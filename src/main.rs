@@ -15,6 +15,8 @@ use std::sync::Arc;
 use tokio::net::TcpListener;
 use varlink_parser::IDL;
 
+mod openapi;
+
 #[derive(Debug)]
 struct AppError {
     status: StatusCode,
@@ -190,6 +192,31 @@ async fn route_info_address_interface_get(
     Ok(axum::Json(json!({"method_names": iface.method_keys})))
 }
 
+async fn route_openapi_get(
+    Path((address, interface)): Path<(String, String)>,
+    State(state): State<AppState>,
+) -> Result<axum::Json<Value>, AppError> {
+    debug!("GET openapi for address: {address}, interface: {interface}");
+    let connection = get_varlink_connection(&address, &state).await?;
+
+    let mut call = varlink::AsyncMethodCall::<Value, Value, varlink::Error>::new(
+        connection,
+        "org.varlink.service.GetInterfaceDescription",
+        json!({"interface": interface}),
+    );
+    let reply = call.call().await?;
+
+    let description = reply
+        .get("description")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| AppError::bad_gateway("upstream response missing 'description' field"))?;
+
+    let iface = IDL::try_from(description)
+        .map_err(|e| AppError::bad_gateway(format!("upstream IDL parse error: {e}")))?;
+
+    Ok(axum::Json(openapi::idl_to_openapi(&address, &iface)))
+}
+
 async fn route_call_post(
     Path((address, method)): Path<(String, String)>,
     State(state): State<AppState>,
@@ -225,6 +252,10 @@ fn create_router(varlink_sockets_dir: String) -> anyhow::Result<Router> {
         .route(
             "/info/{address}/{interface}",
             get(route_info_address_interface_get),
+        )
+        .route(
+            "/openapi/{address}/{interface}",
+            get(route_openapi_get),
         )
         .route("/call/{address}/{method}", post(route_call_post))
         .with_state(shared_state);
@@ -553,6 +584,30 @@ mod tests {
             res.unwrap_err().to_string(),
             "path /does-not-exist is not a directory"
         );
+    }
+
+    #[tokio::test]
+    async fn test_integration_real_systemd_openapi_get() {
+        let (server, local_addr) = run_test_server().await;
+        defer! {
+            server.abort();
+        };
+
+        let client = Client::new();
+        let res = client
+            .get(format!(
+                "http://{}/openapi/io.systemd.Hostname/io.systemd.Hostname",
+                local_addr,
+            ))
+            .send()
+            .await
+            .expect("failed to get openapi from test server");
+        assert_eq!(res.status(), 200);
+        let body: Value = res.json().await.expect("openapi body invalid");
+        assert_eq!(body["openapi"], "3.1.0");
+        assert!(body.get("paths").is_some(), "missing 'paths' key");
+        assert!(body.get("info").is_some(), "missing 'info' key");
+        assert_eq!(body["info"]["title"], "io.systemd.Hostname");
     }
 
     #[tokio::test]

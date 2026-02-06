@@ -10,6 +10,7 @@ The URL schema looks like this:
 /info/{address}
 /info/{address}/{interface}
 /call/{address}/{method}
+/openapi/{address}/{interface}
 ```
 and the paramters are POSTed as regular json.
 
