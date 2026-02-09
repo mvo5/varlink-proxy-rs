@@ -215,6 +215,72 @@ async fn route_call_post(
     Ok(axum::Json(reply))
 }
 
+struct TlsListener {
+    inner: TcpListener,
+    acceptor: openssl::ssl::SslAcceptor,
+}
+
+impl axum::serve::Listener for TlsListener {
+    type Io = tokio_openssl::SslStream<tokio::net::TcpStream>;
+    type Addr = std::net::SocketAddr;
+
+    async fn accept(&mut self) -> (Self::Io, Self::Addr) {
+        loop {
+            let (stream, addr) = match self.inner.accept().await {
+                Ok(conn) => conn,
+                Err(e) => {
+                    debug!("TCP accept failed: {e}");
+                    continue;
+                }
+            };
+            let ssl = match openssl::ssl::Ssl::new(self.acceptor.context()) {
+                Ok(ssl) => ssl,
+                Err(e) => {
+                    debug!("SSL context error: {e}");
+                    continue;
+                }
+            };
+            let mut tls_stream = match tokio_openssl::SslStream::new(ssl, stream) {
+                Ok(s) => s,
+                Err(e) => {
+                    debug!("SSL stream creation failed: {e}");
+                    continue;
+                }
+            };
+            match std::pin::Pin::new(&mut tls_stream).accept().await {
+                Ok(()) => return (tls_stream, addr),
+                Err(e) => {
+                    debug!("TLS handshake failed: {e}");
+                }
+            }
+        }
+    }
+
+    fn local_addr(&self) -> std::io::Result<Self::Addr> {
+        self.inner.local_addr()
+    }
+}
+
+fn load_tls_acceptor(
+    cert_path: &str,
+    key_path: &str,
+    client_ca_path: Option<&str>,
+) -> anyhow::Result<openssl::ssl::SslAcceptor> {
+    use openssl::ssl::{SslAcceptor, SslFiletype, SslMethod, SslVerifyMode};
+
+    let mut builder = SslAcceptor::mozilla_modern_v5(SslMethod::tls_server())?;
+    builder.set_certificate_chain_file(cert_path)?;
+    builder.set_private_key_file(key_path, SslFiletype::PEM)?;
+    builder.check_private_key()?;
+
+    if let Some(ca_path) = client_ca_path {
+        builder.set_ca_file(ca_path)?;
+        builder.set_verify(SslVerifyMode::PEER | SslVerifyMode::FAIL_IF_NO_PEER_CERT);
+    }
+
+    Ok(builder.build())
+}
+
 fn create_router(varlink_sockets_dir: String) -> anyhow::Result<Router> {
     if !std::path::Path::new(&varlink_sockets_dir).is_dir() {
         bail!("path {varlink_sockets_dir} is not a directory");
@@ -244,11 +310,26 @@ async fn shutdown_signal() {
     println!("Shutdown signal received, stopping server...");
 }
 
-async fn run_server(varlink_sockets_dir: String, listener: TcpListener) -> anyhow::Result<()> {
+async fn run_server(
+    varlink_sockets_dir: String,
+    listener: TcpListener,
+    tls_acceptor: Option<openssl::ssl::SslAcceptor>,
+) -> anyhow::Result<()> {
     let app = create_router(varlink_sockets_dir)?;
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
-        .await?;
+
+    if let Some(acceptor) = tls_acceptor {
+        let tls_listener = TlsListener {
+            inner: listener,
+            acceptor,
+        };
+        axum::serve(tls_listener, app)
+            .with_graceful_shutdown(shutdown_signal())
+            .await?;
+    } else {
+        axum::serve(listener, app)
+            .with_graceful_shutdown(shutdown_signal())
+            .await?;
+    }
 
     Ok(())
 }
@@ -260,6 +341,18 @@ struct Cli {
     // XXX: use 0.0.0.0:8080 once we have a security story
     #[argh(option, default = "String::from(\"127.0.0.1:8080\")")]
     bind: String,
+
+    /// path to TLS certificate PEM file
+    #[argh(option)]
+    tls_cert: Option<String>,
+
+    /// path to TLS private key PEM file
+    #[argh(option)]
+    tls_key: Option<String>,
+
+    /// path to CA certificate PEM file for client certificate verification (mTLS)
+    #[argh(option)]
+    tls_client_ca: Option<String>,
 
     /// varlink unix socket dir to proxy, contains the sockets or symlinks to sockets
     #[argh(positional, default = "String::from(\"/run/systemd/registry\")")]
@@ -274,15 +367,33 @@ async fn main() -> anyhow::Result<()> {
     // not using "clap" crate as it adds 600kb even with minimal settings
     let cli: Cli = argh::from_env();
 
+    let tls_acceptor = match (cli.tls_cert.as_deref(), cli.tls_key.as_deref()) {
+        (Some(cert), Some(key)) => {
+            Some(load_tls_acceptor(cert, key, cli.tls_client_ca.as_deref())?)
+        }
+        (None, None) => {
+            if cli.tls_client_ca.is_some() {
+                bail!("--tls-client-ca requires --tls-cert and --tls-key");
+            }
+            None
+        }
+        _ => bail!("--tls-cert and --tls-key must be specified together"),
+    };
+
     let listener = TcpListener::bind(&cli.bind).await?;
     let local_addr = listener.local_addr()?;
+    let scheme = if tls_acceptor.is_some() {
+        "HTTPS"
+    } else {
+        "HTTP"
+    };
 
     println!("🚀 Varlink proxy started");
     println!(
-        "🔗 Forwarding HTTP {} -> Varlink dir: {}",
-        local_addr, &cli.varlink_sockets_dir
+        "🔗 Forwarding {scheme} {local_addr} -> Varlink dir: {}",
+        &cli.varlink_sockets_dir
     );
-    run_server(cli.varlink_sockets_dir, listener).await
+    run_server(cli.varlink_sockets_dir, listener, tls_acceptor).await
 }
 
 #[cfg(test)]

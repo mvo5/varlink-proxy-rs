@@ -15,6 +15,9 @@ env_logger = { version = "0.11", default-features = false, features = ["color", 
 argh = "0.1"
 # not using full regex as it adds more bloat and our requirements are minimal
 regex-lite = "0.1"
+# using opeenssl here to keep size small, native rust TLS adds ~1.8MB binary size
+openssl = "0.10"
+tokio-openssl = "0.6"
 
 [dev-dependencies]
 tempfile = "3.10"
