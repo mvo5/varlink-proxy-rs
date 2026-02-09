@@ -1,12 +1,16 @@
 use super::*;
+use futures_util::{SinkExt, StreamExt};
 use gethostname::gethostname;
 use reqwest::Client;
 use scopeguard::defer;
 use std::os::fd::OwnedFd;
 use tokio::task::JoinSet;
+use tokio_tungstenite::tungstenite::Message as WsMsg;
 
-async fn run_test_server() -> (tokio::task::JoinHandle<()>, std::net::SocketAddr) {
-    let varlink_sockets_dir = "/run/systemd";
+async fn run_test_server(
+    varlink_sockets_dir: &str,
+) -> (tokio::task::JoinHandle<()>, std::net::SocketAddr) {
+    let varlink_sockets_dir = varlink_sockets_dir.to_string();
 
     let listener = TcpListener::bind("127.0.0.1:0")
         .await
@@ -27,7 +31,7 @@ async fn run_test_server() -> (tokio::task::JoinHandle<()>, std::net::SocketAddr
 #[test_with::path(/run/systemd/io.systemd.Hostname)]
 #[tokio::test]
 async fn test_integration_real_systemd_hostname_post() {
-    let (server, local_addr) = run_test_server().await;
+    let (server, local_addr) = run_test_server("/run/systemd").await;
     defer! {
         server.abort();
     };
@@ -50,7 +54,7 @@ async fn test_integration_real_systemd_hostname_post() {
 #[test_with::path(/run/systemd/io.systemd.Hostname)]
 #[tokio::test]
 async fn test_integration_real_systemd_socket_get() {
-    let (server, local_addr) = run_test_server().await;
+    let (server, local_addr) = run_test_server("/run/systemd").await;
     defer! {
         server.abort();
     };
@@ -69,7 +73,7 @@ async fn test_integration_real_systemd_socket_get() {
 #[test_with::path(/run/systemd/io.systemd.Hostname)]
 #[tokio::test]
 async fn test_integration_real_systemd_sockets_get() {
-    let (server, local_addr) = run_test_server().await;
+    let (server, local_addr) = run_test_server("/run/systemd").await;
     defer! {
         server.abort();
     };
@@ -93,7 +97,7 @@ async fn test_integration_real_systemd_sockets_get() {
 #[test_with::path(/run/systemd/io.systemd.Hostname)]
 #[tokio::test]
 async fn test_integration_real_systemd_socket_interface_get() {
-    let (server, local_addr) = run_test_server().await;
+    let (server, local_addr) = run_test_server("/run/systemd").await;
     defer! {
         server.abort();
     };
@@ -115,7 +119,7 @@ async fn test_integration_real_systemd_socket_interface_get() {
 #[test_with::path(/run/systemd/io.systemd.Hostname)]
 #[tokio::test]
 async fn test_integration_real_systemd_hostname_parallel() {
-    let (server, local_addr) = run_test_server().await;
+    let (server, local_addr) = run_test_server("/run/systemd").await;
     defer! {
         server.abort();
     };
@@ -157,7 +161,7 @@ async fn test_integration_real_systemd_hostname_parallel() {
 #[test_with::path(/run/systemd/io.systemd.Hostname)]
 #[tokio::test]
 async fn test_integration_real_systemd_socket_query_param() {
-    let (server, local_addr) = run_test_server().await;
+    let (server, local_addr) = run_test_server("/run/systemd").await;
     defer! {
         server.abort();
     };
@@ -180,7 +184,7 @@ async fn test_integration_real_systemd_socket_query_param() {
 #[test_with::path(/run/systemd)]
 #[tokio::test]
 async fn test_error_bad_request_on_malformed_json() {
-    let (server, local_addr) = run_test_server().await;
+    let (server, local_addr) = run_test_server("/run/systemd").await;
     defer! {
         server.abort();
     };
@@ -203,7 +207,7 @@ async fn test_error_bad_request_on_malformed_json() {
 #[test_with::path(/run/systemd)]
 #[tokio::test]
 async fn test_error_unknown_varlink_address() {
-    let (server, local_addr) = run_test_server().await;
+    let (server, local_addr) = run_test_server("/run/systemd").await;
     defer! {
         server.abort();
     };
@@ -229,7 +233,7 @@ async fn test_error_unknown_varlink_address() {
 #[test_with::path(/run/systemd/io.systemd.Hostname)]
 #[tokio::test]
 async fn test_error_404_for_missing_method() {
-    let (server, local_addr) = run_test_server().await;
+    let (server, local_addr) = run_test_server("/run/systemd").await;
     defer! {
         server.abort();
     };
@@ -253,7 +257,7 @@ async fn test_error_404_for_missing_method() {
 #[test_with::path(/run/systemd)]
 #[tokio::test]
 async fn test_error_bad_request_for_unclean_address() {
-    let (server, local_addr) = run_test_server().await;
+    let (server, local_addr) = run_test_server("/run/systemd").await;
     defer! {
         server.abort();
     };
@@ -281,7 +285,7 @@ async fn test_error_bad_request_for_unclean_address() {
 #[test_with::path(/run/systemd)]
 #[tokio::test]
 async fn test_error_bad_request_for_invalid_chars_in_address() {
-    let (server, local_addr) = run_test_server().await;
+    let (server, local_addr) = run_test_server("/run/systemd").await;
     defer! {
         server.abort();
     };
@@ -309,7 +313,7 @@ async fn test_error_bad_request_for_invalid_chars_in_address() {
 #[test_with::path(/run/systemd)]
 #[tokio::test]
 async fn test_error_bad_request_for_method_without_dots() {
-    let (server, local_addr) = run_test_server().await;
+    let (server, local_addr) = run_test_server("/run/systemd").await;
     defer! {
         server.abort();
     };
@@ -333,7 +337,7 @@ async fn test_error_bad_request_for_method_without_dots() {
 #[test_with::path(/run/systemd)]
 #[tokio::test]
 async fn test_health_endpoint() {
-    let (server, local_addr) = run_test_server().await;
+    let (server, local_addr) = run_test_server("/run/systemd").await;
     defer! {
         server.abort();
     };
@@ -398,4 +402,100 @@ async fn test_varlink_unix_sockets_in_skips_dangling_symlinks() {
         .await
         .expect("varlink_unix_sockets_in should not fail on dangling symlinks");
     assert_eq!(sockets, vec!["io.systemd.Hostname"]);
+}
+
+#[test_with::path(/run/systemd/io.systemd.Hostname)]
+#[tokio::test]
+async fn test_ws_hostname_describe() {
+    let (server, local_addr) = run_test_server("/run/systemd").await;
+    defer! {
+        server.abort();
+    };
+
+    let url = format!("ws://{local_addr}/ws/sockets/io.systemd.Hostname");
+    let (mut ws, _) = tokio_tungstenite::connect_async(&url)
+        .await
+        .expect("WS connect failed");
+
+    let mut msg = r#"{"method":"io.systemd.Hostname.Describe","parameters":{}}"#.to_string();
+    msg.push('\0');
+    ws.send(WsMsg::Text(msg.into()))
+        .await
+        .expect("WS send failed");
+
+    // each varlink message arrives as one WS binary frame (with NUL delimiter)
+    let msg = ws
+        .next()
+        .await
+        .expect("no WS response")
+        .expect("WS recv error");
+    let data = msg.into_data();
+    let json_bytes = data.strip_suffix(&[0]).unwrap_or(&data);
+    let body: Value = serde_json::from_slice(json_bytes).expect("response not valid JSON");
+
+    // raw varlink protocol wraps responses in "parameters"
+    let expected_hostname = gethostname().into_string().expect("failed to get hostname");
+    assert_eq!(body["parameters"]["Hostname"], expected_hostname);
+}
+
+#[test_with::path(/run/systemd/userdb/io.systemd.Multiplexer)]
+#[tokio::test]
+async fn test_ws_userdb_get_user_record_more() {
+    let (server, local_addr) = run_test_server("/run/systemd/userdb").await;
+    defer! {
+        server.abort();
+    };
+
+    let url = format!("ws://{local_addr}/ws/sockets/io.systemd.Multiplexer");
+    let (mut ws, _) = tokio_tungstenite::connect_async(&url)
+        .await
+        .expect("WS connect failed");
+
+    // Send varlink "more" call as binary frame (NUL-delimited)
+    let mut msg = r#"{
+        "method": "io.systemd.UserDatabase.GetUserRecord",
+        "parameters": {"service": "io.systemd.Multiplexer"},
+        "more": true
+    }"#
+    .as_bytes()
+    .to_vec();
+    msg.push(0);
+    ws.send(WsMsg::Binary(msg.into()))
+        .await
+        .expect("WS send failed");
+
+    let mut users = Vec::new();
+    loop {
+        let Some(Ok(msg)) = ws.next().await else {
+            break;
+        };
+        let data = msg.into_data();
+        let json_bytes = data.strip_suffix(&[0]).unwrap_or(&data);
+        if json_bytes.is_empty() {
+            continue;
+        }
+        let body: Value = serde_json::from_slice(json_bytes).expect("response not valid JSON");
+
+        if body.get("error").is_some() {
+            break;
+        }
+        let name = body["parameters"]["record"]["userName"]
+            .as_str()
+            .expect("userName missing from user record");
+        users.push(name.to_string());
+
+        if !body
+            .get("continues")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+        {
+            break;
+        }
+    }
+
+    // we expect at least root + current user
+    assert!(
+        users.len() >= 2,
+        "expected at least 2 user records, got users {users:#?}"
+    );
 }
