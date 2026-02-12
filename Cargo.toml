@@ -16,9 +16,10 @@ argh = "0.1"
 # not using full regex as it adds more bloat and our requirements are minimal
 regex-lite = "0.1"
 listenfd = "1.0.2"
+libc = "0.2"
+tempfile = "3.10"
 
 [dev-dependencies]
-tempfile = "3.10"
 reqwest = { version = "0.12", default-features = false, features = ["json"] }
 test-with = { version = "0.14", default-features = false, features = ["runtime"] }
 scopeguard = "1.2"

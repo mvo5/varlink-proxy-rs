@@ -13,7 +13,7 @@ use regex_lite::Regex;
 use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::os::fd::{AsRawFd, OwnedFd};
-use std::os::unix::fs::FileTypeExt;
+use std::os::unix::fs::{FileTypeExt, OpenOptionsExt, PermissionsExt};
 use std::sync::{Arc, LazyLock};
 use tokio::net::TcpListener;
 use tokio::signal;
@@ -111,6 +111,8 @@ async fn get_varlink_connection_with_validate_socket(
 #[derive(Clone)]
 struct AppState {
     varlink_sockets_dirfd: Arc<OwnedFd>,
+    // only used when calling with a single socket, needed to pin the socketfd
+    _single_socketfd: Option<Arc<(OwnedFd, tempfile::TempDir)>>,
 }
 
 async fn varlink_unix_sockets_in(varlink_sockets_dirfd: &OwnedFd) -> Result<Vec<String>, AppError> {
@@ -222,14 +224,55 @@ async fn route_call_post(
     Ok(axum::Json(reply))
 }
 
-fn create_router(varlink_sockets_dir: &str) -> anyhow::Result<Router> {
-    let dir_file = std::fs::File::open(varlink_sockets_dir)
-        .with_context(|| format!("failed to open {varlink_sockets_dir}"))?;
-    if !dir_file.metadata()?.is_dir() {
-        bail!("path {varlink_sockets_dir} is not a directory");
-    }
-    let shared_state = AppState {
-        varlink_sockets_dirfd: Arc::new(dir_file.into()),
+fn app_state_for_socket_dir(dir_path: &str) -> anyhow::Result<AppState> {
+    let dir_file =
+        std::fs::File::open(dir_path).with_context(|| format!("failed to open {dir_path}"))?;
+    Ok(AppState {
+        varlink_sockets_dirfd: Arc::new(OwnedFd::from(dir_file)),
+        _single_socketfd: None,
+    })
+}
+
+fn app_state_for_single_socket(socket_path: &str) -> anyhow::Result<AppState> {
+    let path = std::path::Path::new(socket_path);
+    let socket_name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or_else(|| anyhow::anyhow!("cannot extract socket name from {socket_path}"))?;
+
+    let socket_fd: OwnedFd = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_PATH)
+        .open(socket_path)
+        .with_context(|| format!("failed to open socket {socket_path}"))?
+        .into();
+
+    let tmpdir = tempfile::Builder::new()
+        .prefix("varlink-http-bridge.")
+        .tempdir()
+        .context("failed to create tmpdir for single-socket mode")?;
+    std::fs::set_permissions(tmpdir.path(), std::fs::Permissions::from_mode(0o700))?;
+
+    let symlink_target = format!("/proc/self/fd/{}", socket_fd.as_raw_fd());
+    std::os::unix::fs::symlink(&symlink_target, tmpdir.path().join(socket_name))?;
+
+    let dir_file = std::fs::File::open(tmpdir.path()).context("failed to open tmpdir")?;
+    Ok(AppState {
+        varlink_sockets_dirfd: Arc::new(OwnedFd::from(dir_file)),
+        _single_socketfd: Some(Arc::new((socket_fd, tmpdir))),
+    })
+}
+
+fn create_router(varlink_sockets_path: &str) -> anyhow::Result<Router> {
+    let metadata = std::fs::metadata(varlink_sockets_path)
+        .with_context(|| format!("failed to stat {varlink_sockets_path}"))?;
+
+    let shared_state = if metadata.is_dir() {
+        app_state_for_socket_dir(varlink_sockets_path)?
+    } else if metadata.file_type().is_socket() {
+        app_state_for_single_socket(varlink_sockets_path)?
+    } else {
+        bail!("path {varlink_sockets_path} is neither a directory nor a socket");
     };
 
     let app = Router::new()
@@ -259,8 +302,8 @@ async fn shutdown_signal() {
     println!("Shutdown signal received, stopping server...");
 }
 
-async fn run_server(varlink_sockets_dir: &str, listener: TcpListener) -> anyhow::Result<()> {
-    let app = create_router(varlink_sockets_dir)?;
+async fn run_server(varlink_sockets_path: &str, listener: TcpListener) -> anyhow::Result<()> {
+    let app = create_router(varlink_sockets_path)?;
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())
         .await?;
@@ -276,9 +319,9 @@ struct Cli {
     #[argh(option, default = "String::from(\"127.0.0.1:8080\")")]
     bind: String,
 
-    /// varlink unix socket dir to proxy, contains the sockets or symlinks to sockets
+    /// varlink unix socket path to proxy: a directory of sockets/symlinks or a single socket
     #[argh(positional, default = "String::from(\"/run/systemd/registry\")")]
-    varlink_sockets_dir: String,
+    varlink_sockets_path: String,
 }
 
 #[tokio::main]
@@ -302,10 +345,10 @@ async fn main() -> anyhow::Result<()> {
 
     eprintln!("Varlink proxy started");
     eprintln!(
-        "Forwarding HTTP {local_addr} -> Varlink dir: {varlink_sockets_dir}",
-        varlink_sockets_dir = &cli.varlink_sockets_dir
+        "Forwarding HTTP {local_addr} -> Varlink: {varlink_sockets_path}",
+        varlink_sockets_path = &cli.varlink_sockets_path
     );
-    run_server(&cli.varlink_sockets_dir, listener).await
+    run_server(&cli.varlink_sockets_path, listener).await
 }
 
 #[cfg(test)]
