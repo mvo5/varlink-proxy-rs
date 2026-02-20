@@ -247,3 +247,70 @@ $ VARLINK_BRIDGE_URL=https://myhost:1031/ws/sockets/io.systemd.Hostname \
     varlinkctl call exec:/usr/libexec/varlinkctl-helper \
     io.systemd.Hostname.Describe '{}'
 ```
+
+## SSH key authentication
+
+The bridge can authenticate requests using SSH public keys. If you
+have an SSH agent running clients authenticate automatically with zero
+extra configuration. Note that RSA keys are *not* supported, just
+Ed25519 and ECDSA keys.
+
+### Server setup
+
+Pass `--authorized-keys=` with a path to an openssh `authorized_keys`
+file, e.g.:
+
+```console
+$ varlink-http-bridge --authorized-keys=~/.ssh/authorized_keys
+```
+
+When running as a systemd service, the bridge also checks
+`$CREDENTIALS_DIRECTORY/authorized_keys` automatically. So
+a systemd config like below automatically works.
+
+```ini
+[Service]
+LoadCredential=authorized_keys:/etc/ssh/authorized_keys
+```
+
+### Client setup (key selection)
+
+The varlinkctl-helper uses two methods for signing, checked in order:
+
+1. **`VARLINK_SSH_KEY`** — read the private key file directly (no SSH
+   agent needed). Both the private key path and the `.pub` path are
+   accepted (`.pub` is stripped automatically to find the private key):
+
+   ```console
+   $ export VARLINK_SSH_KEY=~/.ssh/id_ed25519
+   ```
+
+2. **`SSH_AUTH_SOCK`** — fall back to the SSH agent, using the first
+   Ed25519 or ECDSA key it finds. No setup required when the agent is
+   running.
+
+Using `VARLINK_SSH_KEY` is useful in environments without an SSH agent
+(e.g. systemd services, containers, CI):
+
+```ini
+[Service]
+Environment=VARLINK_SSH_KEY=/my/private/bridge_key
+```
+
+
+### Combining with TLS
+
+SSH key auth and TLS/mTLS are independent and should be combined. For
+example, use regular TLS (not mTLS) for transport encryption and SSH
+keys for user authentication:
+
+```console
+$ varlink-http-bridge \
+    --cert=server.pem \
+    --key=server-key.pem \
+    --authorized-keys=~/.ssh/authorized_keys
+```
+
+This is recommended because for websocket requests only the initial
+"upgrade" request is signed with the ssh key, after the upgrade it is
+a plain WebSocket which relies on the underlying TLS for security.

@@ -4,6 +4,7 @@ use axum::{
     extract::ws::{Message, WebSocket, WebSocketUpgrade},
     extract::{DefaultBodyLimit, Path, Query, State},
     http::StatusCode,
+    middleware::Next,
     response::{IntoResponse, Response},
     routing::{get, post},
 };
@@ -20,6 +21,18 @@ use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, UnixStream};
 use tokio::signal;
 use varlink_parser::IDL;
+
+#[cfg(feature = "sshauth")]
+mod auth_ssh;
+
+#[cfg(feature = "sshauth")]
+use auth_ssh::{extract_nonce, maybe_create_ssh_authenticator};
+#[cfg(not(feature = "sshauth"))]
+fn extract_nonce(_headers: &axum::http::HeaderMap) -> Option<String> {
+    None
+}
+#[cfg(all(test, feature = "sshauth"))]
+pub(crate) use auth_ssh::SshKeyAuthenticator;
 
 #[derive(Debug)]
 struct AppError {
@@ -282,9 +295,73 @@ fn resolve_tls_acceptor(
     }
 }
 
+trait Authenticator: Send + Sync {
+    fn check_request(
+        &self,
+        method: &str,
+        path: &str,
+        auth_header: &str,
+        nonce: Option<&str>,
+    ) -> anyhow::Result<()>;
+}
+
+async fn auth_middleware(
+    State(state): State<AppState>,
+    request: axum::http::Request<axum::body::Body>,
+    next: Next,
+) -> Response {
+    if state.authenticators.is_empty() {
+        return next.run(request).await;
+    }
+
+    let auth_header = match request.headers().get("authorization") {
+        Some(val) => match val.to_str() {
+            Ok(s) => s.to_string(),
+            Err(_) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    axum::Json(json!({"error": "invalid Authorization header encoding"})),
+                )
+                    .into_response();
+            }
+        },
+        None => {
+            return (
+                StatusCode::UNAUTHORIZED,
+                axum::Json(json!({"error": "missing Authorization header"})),
+            )
+                .into_response();
+        }
+    };
+
+    let nonce = extract_nonce(request.headers());
+
+    let method = request.method().as_str().to_string();
+    let path = request
+        .uri()
+        .path_and_query()
+        .map_or(request.uri().path(), axum::http::uri::PathAndQuery::as_str)
+        .to_string();
+
+    let mut errors = Vec::new();
+    for authenticator in state.authenticators.iter() {
+        match authenticator.check_request(&method, &path, &auth_header, nonce.as_deref()) {
+            Ok(()) => return next.run(request).await,
+            Err(e) => errors.push(e.to_string()),
+        }
+    }
+
+    (
+        StatusCode::UNAUTHORIZED,
+        axum::Json(json!({"error": errors.join("; ")})),
+    )
+        .into_response()
+}
+
 #[derive(Clone)]
 struct AppState {
     varlink_sockets: Arc<VarlinkSockets>,
+    authenticators: Arc<Vec<Box<dyn Authenticator>>>,
 }
 
 async fn route_sockets_get(State(state): State<AppState>) -> Result<axum::Json<Value>, AppError> {
@@ -494,7 +571,10 @@ async fn handle_ws(mut ws: WebSocket, unix: UnixStream) {
     reader_task.abort();
 }
 
-fn create_router(varlink_sockets_path: &str) -> anyhow::Result<Router> {
+fn create_router(
+    varlink_sockets_path: &str,
+    authenticators: Vec<Box<dyn Authenticator>>,
+) -> anyhow::Result<Router> {
     let metadata = std::fs::metadata(varlink_sockets_path)
         .with_context(|| format!("failed to stat {varlink_sockets_path}"))?;
 
@@ -506,10 +586,11 @@ fn create_router(varlink_sockets_path: &str) -> anyhow::Result<Router> {
         } else {
             bail!("path {varlink_sockets_path} is neither a directory nor a socket");
         }),
+        authenticators: Arc::new(authenticators),
     };
 
-    let app = Router::new()
-        .route("/health", get(|| async { StatusCode::OK }))
+    // API routes behind auth middleware
+    let api = Router::new()
         .route("/sockets", get(route_sockets_get))
         .route("/sockets/{socket}", get(route_socket_get))
         .route(
@@ -518,9 +599,17 @@ fn create_router(varlink_sockets_path: &str) -> anyhow::Result<Router> {
         )
         .route("/call/{method}", post(route_call_post))
         .route("/ws/sockets/{socket}", get(route_ws))
-        // the limit is arbitrary - DO WE NEED IT?
-        .layer(DefaultBodyLimit::max(4 * 1024 * 1024))
-        .with_state(shared_state);
+        .layer(axum::middleware::from_fn_with_state(
+            shared_state.clone(),
+            auth_middleware,
+        ))
+        .with_state(shared_state.clone());
+
+    // Health endpoint is always open (no auth)
+    let app = Router::new()
+        .route("/health", get(|| async { StatusCode::OK }))
+        .merge(api)
+        .layer(DefaultBodyLimit::max(4 * 1024 * 1024));
 
     Ok(app)
 }
@@ -540,8 +629,9 @@ async fn run_server(
     varlink_sockets_path: &str,
     listener: TcpListener,
     tls_acceptor: Option<openssl::ssl::SslAcceptor>,
+    authenticators: Vec<Box<dyn Authenticator>>,
 ) -> anyhow::Result<()> {
-    let app = create_router(varlink_sockets_path)?;
+    let app = create_router(varlink_sockets_path, authenticators)?;
 
     if let Some(acceptor) = tls_acceptor {
         let tls_listener = TlsListener {
@@ -567,6 +657,8 @@ struct Cli {
     cert: Option<String>,
     key: Option<String>,
     trust: Option<String>,
+    authorized_keys: Option<String>,
+    insecure: bool,
 }
 
 fn print_help() {
@@ -584,6 +676,8 @@ fn print_help() {
           --cert=PATH           path to TLS certificate PEM file
           --key=PATH            path to TLS private key PEM file
           --trust=PATH          path to CA certificate PEM for client verification (mTLS)
+          --authorized-keys=PATH  path to authorized SSH public keys file
+          --insecure            allow running without any authentication (DANGEROUS)
           --help                display this help and exit
     "});
 }
@@ -591,11 +685,13 @@ fn print_help() {
 fn parse_cli() -> anyhow::Result<Cli> {
     use lexopt::prelude::*;
 
-    let mut bind = String::from("127.0.0.1:1031");
+    let mut bind = String::from("0.0.0.0:1031");
     let mut varlink_sockets_path = String::from("/run/systemd/registry");
     let mut cert = None;
     let mut key = None;
     let mut trust = None;
+    let mut authorized_keys = None;
+    let mut insecure = false;
     let mut got_positional = false;
 
     let mut parser = lexopt::Parser::from_env();
@@ -605,6 +701,8 @@ fn parse_cli() -> anyhow::Result<Cli> {
             Long("cert") => cert = Some(parser.value()?.parse()?),
             Long("key") => key = Some(parser.value()?.parse()?),
             Long("trust") => trust = Some(parser.value()?.parse()?),
+            Long("authorized-keys") => authorized_keys = Some(parser.value()?.parse()?),
+            Long("insecure") => insecure = true,
             Long("help") => {
                 print_help();
                 std::process::exit(0);
@@ -623,6 +721,8 @@ fn parse_cli() -> anyhow::Result<Cli> {
         cert,
         key,
         trust,
+        authorized_keys,
+        insecure,
     })
 }
 
@@ -644,7 +744,35 @@ async fn main() -> anyhow::Result<()> {
     };
 
     let creds_dir = std::env::var_os("CREDENTIALS_DIRECTORY").map(std::path::PathBuf::from);
+
+    // Resolve mTLS: remember if client-ca-file was provided before consuming the options
+    let has_mtls = cli.trust.is_some()
+        || creds_dir
+            .as_ref()
+            .is_some_and(|d| d.join("trust").exists());
+
     let tls_acceptor = resolve_tls_acceptor(cli.cert, cli.key, cli.trust, creds_dir.as_deref())?;
+
+    #[cfg(not(feature = "sshauth"))]
+    if cli.authorized_keys.is_some() {
+        bail!("--authorized-keys= requires building with the 'sshauth' feature");
+    }
+
+    let mut authenticators: Vec<Box<dyn Authenticator>> = Vec::new();
+
+    #[cfg(feature = "sshauth")]
+    if let Some(ssh_auth) =
+        maybe_create_ssh_authenticator(cli.authorized_keys, creds_dir.as_deref())?
+    {
+        authenticators.push(Box::new(ssh_auth));
+    }
+
+    if authenticators.is_empty() && !has_mtls && !cli.insecure {
+        bail!("no authentication configured: use --authorized-keys=, --trust=, or --insecure");
+    }
+    if cli.insecure && authenticators.is_empty() && !has_mtls {
+        eprintln!("WARNING: running without authentication - all routes are open");
+    }
 
     let local_addr = listener.local_addr()?;
     let scheme = if tls_acceptor.is_some() {
@@ -658,7 +786,13 @@ async fn main() -> anyhow::Result<()> {
         "Forwarding {scheme} {local_addr} -> Varlink: {varlink_sockets_path}",
         varlink_sockets_path = &cli.varlink_sockets_path
     );
-    run_server(&cli.varlink_sockets_path, listener, tls_acceptor).await
+    run_server(
+        &cli.varlink_sockets_path,
+        listener,
+        tls_acceptor,
+        authenticators,
+    )
+    .await
 }
 
 #[cfg(test)]
