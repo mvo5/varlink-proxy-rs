@@ -629,7 +629,7 @@ fn parse_cli() -> anyhow::Result<Cli> {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     // not using "tracing" crate here because its quite big (>1.2mb to the production build)
-    env_logger::init();
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn")).init();
 
     let cli = parse_cli()?;
 
