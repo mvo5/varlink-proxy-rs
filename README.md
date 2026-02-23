@@ -185,15 +185,15 @@ $ varlink --bridge "websocat --binary ws://localhost:8080/ws/sockets/io.systemd.
 
 ## TLS / mTLS
 
-TLS flag names follow the Kubernetes API server convention.
+TLS flag names follow the systemd convention.
 
 ```
---tls-cert-file        path to TLS certificate PEM file
---tls-private-key-file path to TLS private key PEM file
---client-ca-file       path to CA certificate PEM for client verification (mTLS)
+--cert=PATH    path to TLS certificate PEM file
+--key=PATH     path to TLS private key PEM file
+--trust=PATH   path to CA certificate PEM for client verification (mTLS)
 ```
 
-Providing `--client-ca-file` implicitly enables mTLS: the server will
+Providing `--trust=` implicitly enables mTLS: the server will
 require clients to present a certificate signed by that CA.
 
 ### systemd credentials
@@ -204,9 +204,9 @@ The credential file names match the CLI flag names:
 
 ```ini
 [Service]
-LoadCredential=tls-cert-file:/etc/ssl/certs/bridge.pem
-LoadCredential=tls-private-key-file:/etc/ssl/private/bridge.pem
-LoadCredential=client-ca-file:/etc/ssl/ca/client-ca.pem
+LoadCredential=cert:/etc/ssl/certs/bridge.pem
+LoadCredential=key:/etc/ssl/private/bridge.pem
+LoadCredential=trust:/etc/ssl/ca/client-ca.pem
 ```
 
 Explicit CLI flags take priority over credentials directory files.

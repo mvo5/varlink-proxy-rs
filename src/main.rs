@@ -1,5 +1,4 @@
 use anyhow::{Context, bail};
-use argh::FromArgs;
 use axum::{
     Router,
     extract::ws::{Message, WebSocket, WebSocketUpgrade},
@@ -253,8 +252,7 @@ fn load_tls_acceptor(
 
 /// Resolve TLS configuration: explicit paths take priority, then fall back to
 /// systemd's $`CREDENTIALS_DIRECTORY` (see systemd.exec(5)), then no TLS.
-/// Credential file names match the CLI flag names: tls-cert-file,
-/// tls-private-key-file, client-ca-file.
+/// Credential file names match the CLI flag names: cert, key, trust.
 fn resolve_tls_acceptor(
     cli_cert: Option<String>,
     cli_key: Option<String>,
@@ -268,19 +266,19 @@ fn resolve_tls_acceptor(
             .and_then(|p| p.to_str().map(String::from))
     };
 
-    let tls_cert = cli_cert.or_else(|| cred("tls-cert-file"));
-    let tls_key = cli_key.or_else(|| cred("tls-private-key-file"));
-    let client_ca = cli_ca.or_else(|| cred("client-ca-file"));
+    let tls_cert = cli_cert.or_else(|| cred("cert"));
+    let tls_key = cli_key.or_else(|| cred("key"));
+    let client_ca = cli_ca.or_else(|| cred("trust"));
 
     match (tls_cert.as_deref(), tls_key.as_deref()) {
         (Some(cert), Some(key)) => Ok(Some(load_tls_acceptor(cert, key, client_ca.as_deref())?)),
         (None, None) => {
             if client_ca.is_some() {
-                bail!("--client-ca-file requires --tls-cert-file and --tls-private-key-file");
+                bail!("--trust requires --cert and --key");
             }
             Ok(None)
         }
-        _ => bail!("--tls-cert-file and --tls-private-key-file must be specified together"),
+        _ => bail!("--cert and --key must be specified together"),
     }
 }
 
@@ -562,33 +560,70 @@ async fn run_server(
     Ok(())
 }
 
-/// A proxy for Varlink sockets.
-#[derive(FromArgs, Debug)]
+#[derive(Debug)]
 struct Cli {
-    /// address to bind HTTP server to (default: 127.0.0.1:8080)
-    // XXX: use 0.0.0.0:8080 once we have a security story
-    #[argh(option, default = "String::from(\"127.0.0.1:8080\")")]
     bind: String,
-
-    /// varlink unix socket path to proxy: a directory of sockets/symlinks or a single socket
-    #[argh(positional, default = "String::from(\"/run/systemd/registry\")")]
     varlink_sockets_path: String,
+    cert: Option<String>,
+    key: Option<String>,
+    trust: Option<String>,
+}
 
-    // TLS flag names follow the Kubernetes API server convention
-    // (--tls-cert-file, --tls-private-key-file, --client-ca-file).
-    // Providing --client-ca-file implicitly enables mTLS client
-    // certificate verification.
-    /// path to TLS certificate PEM file
-    #[argh(option)]
-    tls_cert_file: Option<String>,
+fn print_help() {
+    eprint!(indoc::indoc! {"
+        Usage: varlink-http-bridge [OPTIONS] [VARLINK_SOCKETS_PATH]
 
-    /// path to TLS private key PEM file
-    #[argh(option)]
-    tls_private_key_file: Option<String>,
+        A proxy for Varlink sockets.
 
-    /// path to CA certificate PEM file for client certificate verification (mTLS)
-    #[argh(option)]
-    client_ca_file: Option<String>,
+        Positional arguments:
+          VARLINK_SOCKETS_PATH  directory of sockets or a single socket
+                                (default: /run/systemd/registry)
+
+        Options:
+          --bind=ADDR           address to bind HTTP server to (default: 127.0.0.1:8080)
+          --cert=PATH           path to TLS certificate PEM file
+          --key=PATH            path to TLS private key PEM file
+          --trust=PATH          path to CA certificate PEM for client verification (mTLS)
+          --help                display this help and exit
+    "});
+}
+
+fn parse_cli() -> anyhow::Result<Cli> {
+    use lexopt::prelude::*;
+
+    let mut bind = String::from("127.0.0.1:8080");
+    let mut varlink_sockets_path = String::from("/run/systemd/registry");
+    let mut cert = None;
+    let mut key = None;
+    let mut trust = None;
+    let mut got_positional = false;
+
+    let mut parser = lexopt::Parser::from_env();
+    while let Some(arg) = parser.next()? {
+        match arg {
+            Long("bind") => bind = parser.value()?.parse()?,
+            Long("cert") => cert = Some(parser.value()?.parse()?),
+            Long("key") => key = Some(parser.value()?.parse()?),
+            Long("trust") => trust = Some(parser.value()?.parse()?),
+            Long("help") => {
+                print_help();
+                std::process::exit(0);
+            }
+            Value(val) if !got_positional => {
+                varlink_sockets_path = val.parse()?;
+                got_positional = true;
+            }
+            _ => return Err(arg.unexpected().into()),
+        }
+    }
+
+    Ok(Cli {
+        bind,
+        varlink_sockets_path,
+        cert,
+        key,
+        trust,
+    })
 }
 
 #[tokio::main]
@@ -596,8 +631,7 @@ async fn main() -> anyhow::Result<()> {
     // not using "tracing" crate here because its quite big (>1.2mb to the production build)
     env_logger::init();
 
-    // not using "clap" crate as it adds 600kb even with minimal settings
-    let cli: Cli = argh::from_env();
+    let cli = parse_cli()?;
 
     // run with e.g. "systemd-socket-activate -l 127.0.0.1:8080 -- varlink-http-bridge"
     let mut listenfd = ListenFd::from_env();
@@ -610,12 +644,7 @@ async fn main() -> anyhow::Result<()> {
     };
 
     let creds_dir = std::env::var_os("CREDENTIALS_DIRECTORY").map(std::path::PathBuf::from);
-    let tls_acceptor = resolve_tls_acceptor(
-        cli.tls_cert_file,
-        cli.tls_private_key_file,
-        cli.client_ca_file,
-        creds_dir.as_deref(),
-    )?;
+    let tls_acceptor = resolve_tls_acceptor(cli.cert, cli.key, cli.trust, creds_dir.as_deref())?;
 
     let local_addr = listener.local_addr()?;
     let scheme = if tls_acceptor.is_some() {

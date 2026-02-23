@@ -852,16 +852,8 @@ async fn test_tls_credentials_directory_fallback() {
 
     // Set up a fake credentials directory with the well-known file names
     let creds_dir = tempfile::tempdir().unwrap();
-    std::fs::copy(
-        &pki.server_cert_path,
-        creds_dir.path().join("tls-cert-file"),
-    )
-    .unwrap();
-    std::fs::copy(
-        &pki.server_key_path,
-        creds_dir.path().join("tls-private-key-file"),
-    )
-    .unwrap();
+    std::fs::copy(&pki.server_cert_path, creds_dir.path().join("cert")).unwrap();
+    std::fs::copy(&pki.server_key_path, creds_dir.path().join("key")).unwrap();
 
     // No CLI flags — resolve_tls_acceptor should pick up creds from the directory
     let acceptor = resolve_tls_acceptor(None, None, None, Some(creds_dir.path()))

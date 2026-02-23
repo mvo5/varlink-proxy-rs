@@ -12,7 +12,8 @@ varlink = { version = "13.0", features = ["tokio"] }
 varlink_parser = "6.0.0"
 log = "0.4"
 env_logger = { version = "0.11", default-features = false, features = ["color", "humantime"] }
-argh = "0.1"
+# not using clap here as its relatively heavy (500kb-1Mb depending on cfg)
+lexopt = "0.3"
 # not using full regex as it adds more bloat and our requirements are minimal
 regex-lite = "0.1"
 listenfd = "1.0.2"
@@ -23,6 +24,7 @@ signal-hook = "0.3"
 # and nativetls does not support mTLS
 openssl = "0.10"
 tokio-openssl = "0.6"
+indoc = "2.0.7"
 
 [dev-dependencies]
 reqwest = { version = "0.12", default-features = false, features = ["json", "native-tls"] }
