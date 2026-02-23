@@ -264,6 +264,20 @@ file, e.g.:
 $ varlink-http-bridge --authorized-keys=~/.ssh/authorized_keys
 ```
 
+To fetch keys from GitHub (or any HTTPS URL) and save them locally,
+use the `import-ssh` subcommand:
+
+```console
+$ run0 varlink-http-bridge import-ssh gh:myuser
+Wrote 3 key line(s) to /etc/varlink-http-bridge/authorized_keys, run with:
+  varlink-http-bridge --authorized-keys /etc/varlink-http-bridge/authorized_keys
+```
+
+The source can be `gh:<user>` (shorthand for
+`https://github.com/<user>.keys`) or any `https://` URL.  The output
+path is auto-detected but can be overridden with a second positional
+argument.
+
 When running as a systemd service, the bridge also checks
 `$CREDENTIALS_DIRECTORY/authorized_keys` automatically. So
 a systemd config like below automatically works.

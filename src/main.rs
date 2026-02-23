@@ -24,6 +24,8 @@ use varlink_parser::IDL;
 
 #[cfg(feature = "sshauth")]
 mod auth_ssh;
+#[cfg(feature = "sshauth")]
+mod import_ssh;
 
 #[cfg(feature = "sshauth")]
 use auth_ssh::{extract_nonce, maybe_create_ssh_authenticator};
@@ -651,7 +653,14 @@ async fn run_server(
 }
 
 #[derive(Debug)]
-struct Cli {
+enum Command {
+    Bridge(BridgeCli),
+    #[cfg(feature = "sshauth")]
+    ImportSsh(import_ssh::ImportSsh),
+}
+
+#[derive(Debug)]
+struct BridgeCli {
     bind: String,
     varlink_sockets_path: String,
     cert: Option<String>,
@@ -672,17 +681,36 @@ fn print_help() {
                                 (default: /run/systemd/registry)
 
         Options:
-          --bind=ADDR           address to bind HTTP server to (default: 127.0.0.1:1031)
-          --cert=PATH           path to TLS certificate PEM file
-          --key=PATH            path to TLS private key PEM file
-          --trust=PATH          path to CA certificate PEM for client verification (mTLS)
+          --bind=ADDR             address to bind HTTP server to (default: 0.0.0.0:1031)
+          --cert=PATH             path to TLS certificate PEM file
+          --key=PATH              path to TLS private key PEM file
+          --trust=PATH            path to CA certificate PEM for client verification (mTLS)
           --authorized-keys=PATH  path to authorized SSH public keys file
-          --insecure            allow running without any authentication (DANGEROUS)
-          --help                display this help and exit
+          --insecure              allow running without any authentication (DANGEROUS)
+          --help                  display this help and exit
+
+        Subcommands:
+          import-ssh SOURCE [OUTPUT]  download SSH authorized keys from a URL
     "});
 }
 
-fn parse_cli() -> anyhow::Result<Cli> {
+#[cfg(feature = "sshauth")]
+fn print_import_ssh_help() {
+    eprint!(indoc::indoc! {"
+        Usage: varlink-http-bridge import-ssh SOURCE [OUTPUT]
+
+        Download SSH authorized keys from a URL and save to a local file.
+
+        Positional arguments:
+          SOURCE  key source: `gh:<user>` or `https://` URL
+          OUTPUT  output file path (default: auto-detected)
+
+        Options:
+          --help  display this help and exit
+    "});
+}
+
+fn parse_cli() -> anyhow::Result<Command> {
     use lexopt::prelude::*;
 
     let mut bind = String::from("0.0.0.0:1031");
@@ -707,6 +735,10 @@ fn parse_cli() -> anyhow::Result<Cli> {
                 print_help();
                 std::process::exit(0);
             }
+            #[cfg(feature = "sshauth")]
+            Value(val) if !got_positional && val == "import-ssh" => {
+                return parse_import_ssh_args(&mut parser);
+            }
             Value(val) if !got_positional => {
                 varlink_sockets_path = val.parse()?;
                 got_positional = true;
@@ -715,7 +747,7 @@ fn parse_cli() -> anyhow::Result<Cli> {
         }
     }
 
-    Ok(Cli {
+    Ok(Command::Bridge(BridgeCli {
         bind,
         varlink_sockets_path,
         cert,
@@ -723,7 +755,31 @@ fn parse_cli() -> anyhow::Result<Cli> {
         trust,
         authorized_keys,
         insecure,
-    })
+    }))
+}
+
+#[cfg(feature = "sshauth")]
+fn parse_import_ssh_args(parser: &mut lexopt::Parser) -> anyhow::Result<Command> {
+    use lexopt::prelude::*;
+
+    let mut source = None;
+    let mut output = None;
+
+    while let Some(arg) = parser.next()? {
+        match arg {
+            Long("help") => {
+                print_import_ssh_help();
+                std::process::exit(0);
+            }
+            Value(val) if source.is_none() => source = Some(val.parse()?),
+            Value(val) if output.is_none() => output = Some(val.parse()?),
+            _ => return Err(arg.unexpected().into()),
+        }
+    }
+
+    let source =
+        source.ok_or_else(|| anyhow::anyhow!("import-ssh: SOURCE argument is required"))?;
+    Ok(Command::ImportSsh(import_ssh::ImportSsh { source, output }))
 }
 
 #[tokio::main]
@@ -731,7 +787,13 @@ async fn main() -> anyhow::Result<()> {
     // not using "tracing" crate here because its quite big (>1.2mb to the production build)
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn")).init();
 
-    let cli = parse_cli()?;
+    let command = parse_cli()?;
+
+    let cli = match command {
+        #[cfg(feature = "sshauth")]
+        Command::ImportSsh(cmd) => return import_ssh::run(cmd),
+        Command::Bridge(cli) => cli,
+    };
 
     // run with e.g. "systemd-socket-activate -l 127.0.0.1:1031 -- varlink-http-bridge"
     let mut listenfd = ListenFd::from_env();
@@ -745,11 +807,9 @@ async fn main() -> anyhow::Result<()> {
 
     let creds_dir = std::env::var_os("CREDENTIALS_DIRECTORY").map(std::path::PathBuf::from);
 
-    // Resolve mTLS: remember if client-ca-file was provided before consuming the options
-    let has_mtls = cli.trust.is_some()
-        || creds_dir
-            .as_ref()
-            .is_some_and(|d| d.join("trust").exists());
+    // Resolve mTLS: remember if trust was provided before consuming the options
+    let has_mtls =
+        cli.trust.is_some() || creds_dir.as_ref().is_some_and(|d| d.join("trust").exists());
 
     let tls_acceptor = resolve_tls_acceptor(cli.cert, cli.key, cli.trust, creds_dir.as_deref())?;
 
