@@ -257,8 +257,15 @@ Ed25519 and ECDSA keys.
 
 ### Server setup
 
-Pass `--authorized-keys=` with a path to an openssh `authorized_keys`
-file, e.g.:
+The bridge discovers authorized keys automatically from these
+locations (first match wins):
+
+1. `--authorized-keys=PATH` — explicit CLI flag
+2. `/etc/varlink-http-bridge/authorized_keys` — config file
+3. `$CREDENTIALS_DIRECTORY/ssh.authorized_keys.root` — systemd per-service credential (see `systemd.exec(5)`)
+4. `/run/credentials/@system/ssh.authorized_keys.root` — system-wide credential (see `systemd.system-credentials(7)`)
+
+The simplest setup is to pass the path explicitly:
 
 ```console
 $ varlink-http-bridge --authorized-keys=~/.ssh/authorized_keys
@@ -276,15 +283,16 @@ Wrote 3 key line(s) to /etc/varlink-http-bridge/authorized_keys, run with:
 The source can be `gh:<user>` (shorthand for
 `https://github.com/<user>.keys`) or any `https://` URL.  The output
 path is auto-detected but can be overridden with a second positional
-argument.
+argument.  Once written to `/etc/varlink-http-bridge/authorized_keys`,
+the bridge picks up the file automatically (discovery path 2) so the
+`--authorized-keys` flag is no longer needed.
 
-When running as a systemd service, the bridge also checks
-`$CREDENTIALS_DIRECTORY/authorized_keys` automatically. So
-a systemd config like below automatically works.
+When running as a systemd service, the bridge discovers keys from
+credentials automatically (discovery paths 3 and 4):
 
 ```ini
 [Service]
-LoadCredential=authorized_keys:/etc/ssh/authorized_keys
+LoadCredential=ssh.authorized_keys.root:/root/.ssh/authorized_keys
 ```
 
 ### Client setup (key selection)

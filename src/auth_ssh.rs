@@ -193,16 +193,31 @@ pub(crate) fn extract_nonce(headers: &axum::http::HeaderMap) -> Option<String> {
         .map(String::from)
 }
 
+/// Well-known credential name for SSH authorized keys, see
+/// systemd.system-credentials(7).
+const SSH_AUTHORIZED_KEYS_CREDENTIAL: &str = "ssh.authorized_keys.root";
+
 pub(crate) fn maybe_create_ssh_authenticator(
     cli_authorized_keys: Option<String>,
     creds_dir: Option<&std::path::Path>,
+    root: &std::path::Path,
 ) -> anyhow::Result<Option<SshKeyAuthenticator>> {
-    let authorized_keys_path = cli_authorized_keys.or_else(|| {
-        creds_dir
-            .map(|d| d.join("authorized_keys"))
-            .filter(|p| p.exists())
-            .and_then(|p| p.to_str().map(String::from))
-    });
+    fn exists(p: &std::path::Path) -> Option<String> {
+        p.exists().then(|| p.to_string_lossy().to_string())
+    }
+
+    // Priority: explicit CLI > /etc config > $CREDENTIALS_DIRECTORY >
+    // system-wide /run/credentials/@system/ (see systemd.system-credentials(7))
+    let authorized_keys_path = cli_authorized_keys
+        .or_else(|| exists(&root.join("etc/varlink-http-bridge/authorized_keys")))
+        .or_else(|| creds_dir.and_then(|d| exists(&d.join(SSH_AUTHORIZED_KEYS_CREDENTIAL))))
+        .or_else(|| {
+            exists(
+                &root
+                    .join("run/credentials/@system")
+                    .join(SSH_AUTHORIZED_KEYS_CREDENTIAL),
+            )
+        });
 
     let Some(ak_path) = authorized_keys_path else {
         return Ok(None);

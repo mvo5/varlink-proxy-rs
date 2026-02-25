@@ -1022,15 +1022,33 @@ fn test_tls_credentials_directory_returns_none_without_creds() {
 #[cfg(feature = "sshauth")]
 mod sshauth_tests {
     use super::*;
-    use crate::SshKeyAuthenticator;
+    use crate::maybe_create_ssh_authenticator;
 
-    fn make_test_authorized_keys_file(pubkeys: &[&str]) -> tempfile::NamedTempFile {
+    /// Create a fake rootdir with an `etc/varlink-http-bridge/authorized_keys` file.
+    fn make_test_rootdir_with_keys(pubkeys: &[&str]) -> tempfile::TempDir {
         use std::io::Write;
-        let mut f = tempfile::NamedTempFile::new().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("etc/varlink-http-bridge");
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut f = std::fs::File::create(dir.join("authorized_keys")).unwrap();
         for key in pubkeys {
             writeln!(f, "{key}").unwrap();
         }
-        f
+        root
+    }
+
+    /// Generate an ed25519 key pair, returning (pubkey_line, privkey_path).
+    fn generate_ed25519_keypair(dir: &std::path::Path) -> (String, std::path::PathBuf) {
+        let key_path = dir.join("test_ed25519");
+        let status = std::process::Command::new("ssh-keygen")
+            .args(["-t", "ed25519", "-f"])
+            .arg(&key_path)
+            .args(["-N", "", "-q"])
+            .status()
+            .expect("ssh-keygen failed to run");
+        assert!(status.success(), "ssh-keygen failed");
+        let pubkey_line = std::fs::read_to_string(key_path.with_extension("pub")).unwrap();
+        (pubkey_line, key_path)
     }
 
     fn make_auth_test_router(authenticators: Vec<Box<dyn Authenticator>>) -> Router {
@@ -1057,8 +1075,10 @@ mod sshauth_tests {
 
         let b64_blob = openssl::base64::encode_block(&blob);
         let line = format!("ssh-ed25519 {b64_blob} testkey@host");
-        let ak_file = make_test_authorized_keys_file(&[&line]);
-        let auth = SshKeyAuthenticator::new(ak_file.path().to_str().unwrap()).unwrap();
+        let root = make_test_rootdir_with_keys(&[&line]);
+        let auth = maybe_create_ssh_authenticator(None, None, root.path())
+            .unwrap()
+            .unwrap();
 
         assert_eq!(auth.key_count(), 1);
     }
@@ -1077,8 +1097,8 @@ mod sshauth_tests {
         assert!(status.success(), "ssh-keygen failed");
 
         let pub_key_content = std::fs::read_to_string(key_path.with_extension("pub")).unwrap();
-        let ak_file = make_test_authorized_keys_file(&[pub_key_content.trim()]);
-        let result = SshKeyAuthenticator::new(ak_file.path().to_str().unwrap());
+        let root = make_test_rootdir_with_keys(&[pub_key_content.trim()]);
+        let result = maybe_create_ssh_authenticator(None, None, root.path());
         assert!(result.is_err());
         assert!(
             result
@@ -1091,8 +1111,8 @@ mod sshauth_tests {
 
     #[test]
     fn test_ssh_auth_rejects_garbage() {
-        let ak_file = make_test_authorized_keys_file(&["not-a-real-key line", "# comment"]);
-        let result = SshKeyAuthenticator::new(ak_file.path().to_str().unwrap());
+        let root = make_test_rootdir_with_keys(&["not-a-real-key line", "# comment"]);
+        let result = maybe_create_ssh_authenticator(None, None, root.path());
         assert!(result.is_err());
         assert!(
             result
@@ -1105,18 +1125,11 @@ mod sshauth_tests {
     #[tokio::test]
     async fn test_ssh_auth_rejects_expired_timestamp() {
         let tmpdir = tempfile::tempdir().unwrap();
-        let key_path = tmpdir.path().join("test_ed25519");
-        let status = std::process::Command::new("ssh-keygen")
-            .args(["-t", "ed25519", "-f"])
-            .arg(&key_path)
-            .args(["-N", "", "-q"])
-            .status()
-            .expect("ssh-keygen failed to run");
-        assert!(status.success(), "ssh-keygen failed");
+        let (pubkey_line, key_path) = generate_ed25519_keypair(tmpdir.path());
 
-        let pubkey_line = std::fs::read_to_string(key_path.with_extension("pub")).unwrap();
-        let ak_file = make_test_authorized_keys_file(&[pubkey_line.trim()]);
-        let auth = SshKeyAuthenticator::new(ak_file.path().to_str().unwrap())
+        let root = make_test_rootdir_with_keys(&[pubkey_line.trim()]);
+        let auth = maybe_create_ssh_authenticator(None, None, root.path())
+            .unwrap()
             .unwrap()
             .with_max_skew(0);
 
@@ -1146,18 +1159,12 @@ mod sshauth_tests {
     async fn test_ssh_auth_rejects_unknown_fingerprint() {
         // Key A: in authorized_keys
         let tmpdir_a = tempfile::tempdir().unwrap();
-        let key_path_a = tmpdir_a.path().join("key_a");
-        let status = std::process::Command::new("ssh-keygen")
-            .args(["-t", "ed25519", "-f"])
-            .arg(&key_path_a)
-            .args(["-N", "", "-q"])
-            .status()
-            .unwrap();
-        assert!(status.success());
+        let (pubkey_a_line, _) = generate_ed25519_keypair(tmpdir_a.path());
 
-        let pubkey_a_line = std::fs::read_to_string(key_path_a.with_extension("pub")).unwrap();
-        let ak_file = make_test_authorized_keys_file(&[pubkey_a_line.trim()]);
-        let auth = SshKeyAuthenticator::new(ak_file.path().to_str().unwrap()).unwrap();
+        let root = make_test_rootdir_with_keys(&[pubkey_a_line.trim()]);
+        let auth = maybe_create_ssh_authenticator(None, None, root.path())
+            .unwrap()
+            .unwrap();
 
         // Key B: NOT in authorized_keys
         let tmpdir_b = tempfile::tempdir().unwrap();
@@ -1198,18 +1205,12 @@ mod sshauth_tests {
     #[tokio::test]
     async fn test_ssh_auth_verify_ed25519() {
         let tmpdir = tempfile::tempdir().unwrap();
-        let key_path = tmpdir.path().join("test_ed25519");
-        let status = std::process::Command::new("ssh-keygen")
-            .args(["-t", "ed25519", "-f"])
-            .arg(&key_path)
-            .args(["-N", "", "-q"])
-            .status()
-            .expect("ssh-keygen failed to run");
-        assert!(status.success(), "ssh-keygen failed");
+        let (pubkey_line, key_path) = generate_ed25519_keypair(tmpdir.path());
 
-        let pubkey_line = std::fs::read_to_string(key_path.with_extension("pub")).unwrap();
-        let ak_file = make_test_authorized_keys_file(&[pubkey_line.trim()]);
-        let auth = SshKeyAuthenticator::new(ak_file.path().to_str().unwrap()).unwrap();
+        let root = make_test_rootdir_with_keys(&[pubkey_line.trim()]);
+        let auth = maybe_create_ssh_authenticator(None, None, root.path())
+            .unwrap()
+            .unwrap();
 
         let privkey_pem = std::fs::read_to_string(&key_path).unwrap();
         let privkey = ssh_key::PrivateKey::from_openssh(&privkey_pem).unwrap();
@@ -1248,8 +1249,10 @@ mod sshauth_tests {
 
         let b64_blob = openssl::base64::encode_block(&blob);
         let line = format!("ssh-ed25519 {b64_blob} testkey@host");
-        let ak_file = make_test_authorized_keys_file(&[&line]);
-        let auth = SshKeyAuthenticator::new(ak_file.path().to_str().unwrap()).unwrap();
+        let root = make_test_rootdir_with_keys(&[&line]);
+        let auth = maybe_create_ssh_authenticator(None, None, root.path())
+            .unwrap()
+            .unwrap();
 
         let app = make_auth_test_router(vec![Box::new(auth)]);
         let response = app
@@ -1357,8 +1360,10 @@ mod sshauth_tests {
 
         let b64_blob = openssl::base64::encode_block(&blob);
         let line = format!("ssh-ed25519 {b64_blob} testkey@host");
-        let ak_file = make_test_authorized_keys_file(&[&line]);
-        let auth = SshKeyAuthenticator::new(ak_file.path().to_str().unwrap()).unwrap();
+        let root = make_test_rootdir_with_keys(&[&line]);
+        let auth = maybe_create_ssh_authenticator(None, None, root.path())
+            .unwrap()
+            .unwrap();
 
         let app = make_auth_test_router(vec![Box::new(auth)]);
         let response = app
@@ -1386,18 +1391,12 @@ mod sshauth_tests {
     #[tokio::test]
     async fn test_ssh_auth_rejects_replayed_nonce() {
         let tmpdir = tempfile::tempdir().unwrap();
-        let key_path = tmpdir.path().join("test_ed25519");
-        let status = std::process::Command::new("ssh-keygen")
-            .args(["-t", "ed25519", "-f"])
-            .arg(&key_path)
-            .args(["-N", "", "-q"])
-            .status()
-            .expect("ssh-keygen failed to run");
-        assert!(status.success(), "ssh-keygen failed");
+        let (pubkey_line, key_path) = generate_ed25519_keypair(tmpdir.path());
 
-        let pubkey_line = std::fs::read_to_string(key_path.with_extension("pub")).unwrap();
-        let ak_file = make_test_authorized_keys_file(&[pubkey_line.trim()]);
-        let auth = SshKeyAuthenticator::new(ak_file.path().to_str().unwrap()).unwrap();
+        let root = make_test_rootdir_with_keys(&[pubkey_line.trim()]);
+        let auth = maybe_create_ssh_authenticator(None, None, root.path())
+            .unwrap()
+            .unwrap();
 
         let privkey_pem = std::fs::read_to_string(&key_path).unwrap();
         let privkey = ssh_key::PrivateKey::from_openssh(&privkey_pem).unwrap();
@@ -1433,18 +1432,12 @@ mod sshauth_tests {
     #[tokio::test]
     async fn test_ssh_auth_rejects_missing_nonce() {
         let tmpdir = tempfile::tempdir().unwrap();
-        let key_path = tmpdir.path().join("test_ed25519");
-        let status = std::process::Command::new("ssh-keygen")
-            .args(["-t", "ed25519", "-f"])
-            .arg(&key_path)
-            .args(["-N", "", "-q"])
-            .status()
-            .expect("ssh-keygen failed to run");
-        assert!(status.success(), "ssh-keygen failed");
+        let (pubkey_line, key_path) = generate_ed25519_keypair(tmpdir.path());
 
-        let pubkey_line = std::fs::read_to_string(key_path.with_extension("pub")).unwrap();
-        let ak_file = make_test_authorized_keys_file(&[pubkey_line.trim()]);
-        let auth = SshKeyAuthenticator::new(ak_file.path().to_str().unwrap()).unwrap();
+        let root = make_test_rootdir_with_keys(&[pubkey_line.trim()]);
+        let auth = maybe_create_ssh_authenticator(None, None, root.path())
+            .unwrap()
+            .unwrap();
 
         let privkey_pem = std::fs::read_to_string(&key_path).unwrap();
         let privkey = ssh_key::PrivateKey::from_openssh(&privkey_pem).unwrap();
@@ -1462,5 +1455,103 @@ mod sshauth_tests {
         let result = auth.check_request("GET", "/sockets", &header, None);
         assert!(result.is_err(), "request without nonce should be rejected");
         assert!(result.unwrap_err().to_string().contains("missing nonce"));
+    }
+
+    #[test]
+    fn test_ssh_auth_credential_discovery() {
+        use std::io::Write;
+
+        // Generate two ed25519 key pairs (A with 1 key, B with 2 keys)
+        let keygen_dir = tempfile::tempdir().unwrap();
+        let (pubkey_a, _) = generate_ed25519_keypair(keygen_dir.path());
+
+        let keygen_dir_b1 = tempfile::tempdir().unwrap();
+        let (pubkey_b1, _) = generate_ed25519_keypair(keygen_dir_b1.path());
+        let keygen_dir_b2 = tempfile::tempdir().unwrap();
+        let (pubkey_b2, _) = generate_ed25519_keypair(keygen_dir_b2.path());
+
+        // 1. Empty rootdir + no creds_dir → None
+        let empty_root = tempfile::tempdir().unwrap();
+        let result = maybe_create_ssh_authenticator(None, None, empty_root.path()).unwrap();
+        assert!(result.is_none(), "empty rootdir should yield None");
+
+        // 2. rootdir/etc/varlink-http-bridge/authorized_keys exists → found
+        let root = make_test_rootdir_with_keys(&[pubkey_a.trim()]);
+        let auth = maybe_create_ssh_authenticator(None, None, root.path())
+            .unwrap()
+            .unwrap();
+        assert_eq!(auth.key_count(), 1, "should find key from /etc path");
+
+        // 3. rootdir/run/credentials/@system/ssh.authorized_keys.root exists → found
+        let root_run = tempfile::tempdir().unwrap();
+        let run_dir = root_run.path().join("run/credentials/@system");
+        std::fs::create_dir_all(&run_dir).unwrap();
+        std::fs::write(
+            run_dir.join("ssh.authorized_keys.root"),
+            pubkey_a.as_bytes(),
+        )
+        .unwrap();
+        let auth = maybe_create_ssh_authenticator(None, None, root_run.path())
+            .unwrap()
+            .unwrap();
+        assert_eq!(auth.key_count(), 1, "should find key from /run path");
+
+        // 4. Both /etc and /run exist → /etc takes priority (1 key vs 2 keys)
+        let root_both = tempfile::tempdir().unwrap();
+        let etc_dir = root_both.path().join("etc/varlink-http-bridge");
+        std::fs::create_dir_all(&etc_dir).unwrap();
+        std::fs::write(etc_dir.join("authorized_keys"), pubkey_a.as_bytes()).unwrap();
+        let run_dir = root_both.path().join("run/credentials/@system");
+        std::fs::create_dir_all(&run_dir).unwrap();
+        let mut run_file = std::fs::File::create(run_dir.join("ssh.authorized_keys.root")).unwrap();
+        writeln!(run_file, "{}", pubkey_b1.trim()).unwrap();
+        writeln!(run_file, "{}", pubkey_b2.trim()).unwrap();
+        drop(run_file);
+        let auth = maybe_create_ssh_authenticator(None, None, root_both.path())
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            auth.key_count(),
+            1,
+            "/etc (1 key) should take priority over /run (2 keys)"
+        );
+
+        // 5. $CREDENTIALS_DIRECTORY takes priority over /run
+        let creds_dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            creds_dir.path().join("ssh.authorized_keys.root"),
+            pubkey_a.as_bytes(),
+        )
+        .unwrap();
+        let root_with_run_only = tempfile::tempdir().unwrap();
+        let run_dir = root_with_run_only.path().join("run/credentials/@system");
+        std::fs::create_dir_all(&run_dir).unwrap();
+        let mut run_file = std::fs::File::create(run_dir.join("ssh.authorized_keys.root")).unwrap();
+        writeln!(run_file, "{}", pubkey_b1.trim()).unwrap();
+        writeln!(run_file, "{}", pubkey_b2.trim()).unwrap();
+        drop(run_file);
+        let auth =
+            maybe_create_ssh_authenticator(None, Some(creds_dir.path()), root_with_run_only.path())
+                .unwrap()
+                .unwrap();
+        assert_eq!(
+            auth.key_count(),
+            1,
+            "creds_dir (1 key) should take priority over /run (2 keys)"
+        );
+
+        // 6. CLI path overrides everything
+        let cli_root = make_test_rootdir_with_keys(&[pubkey_a.trim()]);
+        let cli_file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(cli_file.path(), "not-a-real-key garbage\n").unwrap();
+        let result = maybe_create_ssh_authenticator(
+            Some(cli_file.path().to_str().unwrap().to_string()),
+            Some(creds_dir.path()),
+            cli_root.path(),
+        );
+        assert!(
+            result.is_err(),
+            "CLI path should be used, not /etc or credential"
+        );
     }
 } // mod sshauth_tests

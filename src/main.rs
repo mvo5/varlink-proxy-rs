@@ -33,9 +33,6 @@ use auth_ssh::{extract_nonce, maybe_create_ssh_authenticator};
 fn extract_nonce(_headers: &axum::http::HeaderMap) -> Option<String> {
     None
 }
-#[cfg(all(test, feature = "sshauth"))]
-pub(crate) use auth_ssh::SshKeyAuthenticator;
-
 #[derive(Debug)]
 struct AppError {
     status: StatusCode,
@@ -821,9 +818,11 @@ async fn main() -> anyhow::Result<()> {
     let mut authenticators: Vec<Box<dyn Authenticator>> = Vec::new();
 
     #[cfg(feature = "sshauth")]
-    if let Some(ssh_auth) =
-        maybe_create_ssh_authenticator(cli.authorized_keys, creds_dir.as_deref())?
-    {
+    if let Some(ssh_auth) = maybe_create_ssh_authenticator(
+        cli.authorized_keys,
+        creds_dir.as_deref(),
+        std::path::Path::new("/"),
+    )? {
         authenticators.push(Box::new(ssh_auth));
     }
 
