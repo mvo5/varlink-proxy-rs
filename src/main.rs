@@ -580,7 +580,7 @@ fn print_help() {
                                 (default: /run/systemd/registry)
 
         Options:
-          --bind=ADDR           address to bind HTTP server to (default: 127.0.0.1:8080)
+          --bind=ADDR           address to bind HTTP server to (default: 127.0.0.1:1031)
           --cert=PATH           path to TLS certificate PEM file
           --key=PATH            path to TLS private key PEM file
           --trust=PATH          path to CA certificate PEM for client verification (mTLS)
@@ -591,7 +591,7 @@ fn print_help() {
 fn parse_cli() -> anyhow::Result<Cli> {
     use lexopt::prelude::*;
 
-    let mut bind = String::from("127.0.0.1:8080");
+    let mut bind = String::from("127.0.0.1:1031");
     let mut varlink_sockets_path = String::from("/run/systemd/registry");
     let mut cert = None;
     let mut key = None;
@@ -633,7 +633,7 @@ async fn main() -> anyhow::Result<()> {
 
     let cli = parse_cli()?;
 
-    // run with e.g. "systemd-socket-activate -l 127.0.0.1:8080 -- varlink-http-bridge"
+    // run with e.g. "systemd-socket-activate -l 127.0.0.1:1031 -- varlink-http-bridge"
     let mut listenfd = ListenFd::from_env();
     let listener = if let Some(std_listener) = listenfd.take_tcp_listener(0)? {
         // needed or tokio panics, see https://github.com/mitsuhiko/listenfd/pull/23

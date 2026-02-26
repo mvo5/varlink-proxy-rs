@@ -42,6 +42,11 @@ This makes the bridge compatible with libvarlink `varlink --brige`
 via `websocat --binary`, enabling full varlink features (including
 `--more`) over the network.
 
+## Default port
+
+The default port is **1031** (NCC-1031, USS Discovery) - because every
+bridge needs a ship, and this one discovers your varlink services.
+
 ## Examples (curl)
 
 Using curl for direct calls is usually more convenient/ergonimic than
@@ -50,7 +55,7 @@ using the websocket endpoint.
 ```console
 $ systemd-run --user ./target/debug/varlink-http-bridge
 
-$ curl -s http://localhost:8080/sockets | jq
+$ curl -s http://localhost:1031/sockets | jq
 {
   "sockets": [
     "io.systemd.Login",
@@ -68,7 +73,7 @@ $ curl -s http://localhost:8080/sockets | jq
   ]
 }
 
-$ curl -s http://localhost:8080/sockets/io.systemd.Hostname | jq
+$ curl -s http://localhost:1031/sockets/io.systemd.Hostname | jq
 {
   "interfaces": [
     "io.systemd",
@@ -82,17 +87,17 @@ $ curl -s http://localhost:8080/sockets/io.systemd.Hostname | jq
   "version": "259 (259-1)"
 }
 
-$ curl -s http://localhost:8080/sockets/io.systemd.Hostname/io.systemd.Hostname | jq
+$ curl -s http://localhost:1031/sockets/io.systemd.Hostname/io.systemd.Hostname | jq
 {
   "method_names": [
     "Describe"
   ]
 }
 
-$ curl -s -X POST http://localhost:8080/call/io.systemd.Hostname.Describe -d '{}' -H "Content-Type: application/json" | jq .StaticHostname
+$ curl -s -X POST http://localhost:1031/call/io.systemd.Hostname.Describe -d '{}' -H "Content-Type: application/json" | jq .StaticHostname
 "top"
 
-$ curl -s -X POST http://localhost:8080/call/org.varlink.service.GetInfo?socket=io.systemd.Hostname -d '{}' -H "Content-Type: application/json" | jq
+$ curl -s -X POST http://localhost:1031/call/org.varlink.service.GetInfo?socket=io.systemd.Hostname -d '{}' -H "Content-Type: application/json" | jq
 {
   "interfaces": [
     "io.systemd",
@@ -116,11 +121,11 @@ becomes even nicer.
 ```console
 # copy varlinkctl-helper into /usr/lib/systemd/varlink-bridges/http
 # (or use SYSTEMD_VARLINK_BRIDGES_DIR)
-$ varlinkctl introspect http://localhost:8080/ws/sockets/io.systemd.Hostname
+$ varlinkctl introspect http://localhost:1031/ws/sockets/io.systemd.Hostname
 interface io.systemd
 ...
 
-$ varlinkctl call http://localhost:8080/ws/sockets/io.systemd.Hostname io.systemd.Hostname.Describe {}
+$ varlinkctl call http://localhost:1031/ws/sockets/io.systemd.Hostname io.systemd.Hostname.Describe {}
 {
         "Hostname" : "top",
 ...
@@ -137,14 +142,14 @@ $ cargo install websocat
 
 # call via websocat: note that this is the raw procotol so the result is wrapped in "paramters"
 # note that the reply also contains the raw \0 so we filter them
-$ printf '{"method":"io.systemd.Hostname.Describe","parameters":{}}\0' | websocat ws://localhost:8080/ws/sockets/io.systemd.Hostname | tr -d '\0' | jq
+$ printf '{"method":"io.systemd.Hostname.Describe","parameters":{}}\0' | websocat ws://localhost:1031/ws/sockets/io.systemd.Hostname | tr -d '\0' | jq
 {
   "parameters": {
     "Hostname": "top",
 ...
 
 # io.systemd.Unit.List streams the output
-$ printf '{"method":"io.systemd.Unit.List","parameters":{}, "more": true}\0' | websocat  --no-close  ws://localhost:8080/ws/sockets/io.systemd.Manager| tr -d '\0' | jq
+$ printf '{"method":"io.systemd.Unit.List","parameters":{}, "more": true}\0' | websocat  --no-close  ws://localhost:1031/ws/sockets/io.systemd.Manager| tr -d '\0' | jq
 {
   "parameters": {
     "context": {
@@ -152,7 +157,7 @@ $ printf '{"method":"io.systemd.Unit.List","parameters":{}, "more": true}\0' | w
 ...
 
 # and user records come via "continues": true
-$ printf '{"method":"io.systemd.UserDatabase.GetUserRecord", "parameters": {"service":"io.systemd.Multiplexer"}, "more": true}\0' | websocat --no-close ws://localhost:8080/ws/sockets/io.systemd.Multiplexer | tr '\0' '\n'|jq
+$ printf '{"method":"io.systemd.UserDatabase.GetUserRecord", "parameters": {"service":"io.systemd.Multiplexer"}, "more": true}\0' | websocat --no-close ws://localhost:1031/ws/sockets/io.systemd.Multiplexer | tr '\0' '\n'|jq
 {
   "parameters": {
     "record": {
@@ -162,18 +167,18 @@ $ printf '{"method":"io.systemd.UserDatabase.GetUserRecord", "parameters": {"ser
 ...
 
 # varlinkctl is supported via our varlinkctl-helper
-$ VARLINK_BRIDGE_URL=http://localhost:8080/ws/sockets/io.systemd.Multiplexer \
+$ VARLINK_BRIDGE_URL=http://localhost:1031/ws/sockets/io.systemd.Multiplexer \
     varlinkctl call --more /usr/libexec/varlinkctl-helper \
 	io.systemd.UserDatabase.GetUserRecord '{"service":"io.systemd.Multiplexer"}'
 
 
 # libvarlink bridge mode gives full varlink CLI support over the network
-$ varlink --bridge "websocat --binary ws://localhost:8080/ws/sockets/io.systemd.Hostname" info
+$ varlink --bridge "websocat --binary ws://localhost:1031/ws/sockets/io.systemd.Hostname" info
 Vendor: The systemd Project
 Product: systemd (systemd-hostnamed)
 ...
 
-$ varlink --bridge "websocat --binary ws://localhost:8080/ws/sockets/io.systemd.Hostname" \
+$ varlink --bridge "websocat --binary ws://localhost:1031/ws/sockets/io.systemd.Hostname" \
     call io.systemd.Hostname.Describe
 {
   "Hostname": "top",
@@ -238,7 +243,7 @@ $ cp client-cert.pem ~/.config/varlink-http-bridge/client-cert-file
 $ cp client-key.pem  ~/.config/varlink-http-bridge/client-key-file
 $ cp ca.pem          ~/.config/varlink-http-bridge/server-ca-file
 
-$ VARLINK_BRIDGE_URL=https://myhost:8080/ws/sockets/io.systemd.Hostname \
+$ VARLINK_BRIDGE_URL=https://myhost:1031/ws/sockets/io.systemd.Hostname \
     varlinkctl call exec:/usr/libexec/varlinkctl-helper \
     io.systemd.Hostname.Describe '{}'
 ```
