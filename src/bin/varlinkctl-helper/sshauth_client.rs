@@ -2,6 +2,14 @@ use anyhow::{Context, Result, bail};
 use log::{debug, warn};
 use varlink_http_bridge::SSHAUTH_MAGIC_PREFIX;
 
+struct Signer {
+    builder: sshauth::signer::TokenSignerBuilder,
+    algo: ssh_key::Algorithm,
+    fingerprint: ssh_key::Fingerprint,
+    comment: String,
+    source: String,
+}
+
 // Slightly ugly to build it here dynamically, but when this code is
 // built without the sshauth feature this file is not built at all so
 // making everything async seems overkill (only this helper needs
@@ -44,55 +52,121 @@ pub(crate) fn maybe_add_auth_headers(
 ///
 /// Returns `Ok(None)` when no SSH credentials are available.
 fn build_auth_token(method: &str, path_and_query: &str) -> Result<Option<(String, String)>> {
-    let key_path = std::env::var("VARLINK_SSH_KEY").ok();
-    let auth_sock = std::env::var("SSH_AUTH_SOCK").ok();
-    if key_path.is_none() && auth_sock.is_none() {
-        return Ok(None);
-    }
-
-    let nonce = generate_nonce();
-
     // The sshauth crate is async so we need to run this inside an async context
-    let bearer = TOKIO_RT.block_on(async {
-        // VARLINK_SSH_KEY: sign directly with the private key file (no agent needed).
-        // SSH_AUTH_SOCK: fall back to the SSH agent.
-        let (mut signer_builder, algo, fingerprint, comment, source) =
-            if let Some(key_path) = key_path {
-                let privkey = read_private_key(&key_path)?;
-                let algo = privkey.algorithm();
-                let fp = privkey.fingerprint(ssh_key::HashAlg::Sha256);
-                let comment = privkey.comment().to_string();
-                let b = sshauth::TokenSigner::using_private_key(privkey)?;
-                (b, algo, fp, comment, key_path)
-            } else {
-                let auth_sock = auth_sock.unwrap();
-                let keys = sshauth::agent::list_keys(&auth_sock)
-                    .await
-                    .context("listing ssh-agent keys")?;
-                let key = read_agent_key(keys)?;
-                let algo = key.algorithm();
-                let fp = key.fingerprint(ssh_key::HashAlg::Sha256);
-                let comment = key.comment().to_string();
-                let mut sb = sshauth::TokenSigner::using_authsock(&auth_sock)?;
-                sb.key(key);
-                (sb, algo, fp, comment, auth_sock)
-            };
-        debug!("SSH auth: using {algo} key {fingerprint} ({comment}) from {source}");
+    TOKIO_RT.block_on(async {
+        let Some(mut signer) = build_signer().await? else {
+            return Ok(None);
+        };
+        debug!(
+            "SSH auth: using {} key {} ({}) from {}",
+            signer.algo, signer.fingerprint, signer.comment, signer.source,
+        );
 
-        signer_builder
+        let nonce = generate_nonce();
+
+        signer
+            .builder
             .include_fingerprint(true)
             .magic_prefix(SSHAUTH_MAGIC_PREFIX);
-        let signer = signer_builder.build()?;
+        let token_signer = signer.builder.build()?;
 
-        let mut tb = signer.sign_for();
+        let mut tb = token_signer.sign_for();
         tb.action("method", method)
             .action("path", path_and_query)
             .action("nonce", &nonce);
         let token: sshauth::token::Token = tb.sign().await?;
-        Ok::<_, anyhow::Error>(format!("Bearer {}", token.encode()))
-    })?;
+        Ok(Some((format!("Bearer {}", token.encode()), nonce)))
+    })
+}
 
-    Ok(Some((bearer, nonce)))
+/// Build a [`Signer`] from the available SSH credentials.
+///
+/// Reads `VARLINK_SSH_KEY` and `SSH_AUTH_SOCK` from the environment and
+/// tries, in order:
+/// 1. `VARLINK_SSH_KEY` with a private key on disk → sign directly.
+/// 2. `VARLINK_SSH_KEY` with only a public key → delegate to the ssh-agent.
+/// 3. `SSH_AUTH_SOCK` only → pick the first supported key from the agent.
+///
+/// Returns `Ok(None)` when neither variable is set.
+async fn build_signer() -> Result<Option<Signer>> {
+    let key_path = std::env::var("VARLINK_SSH_KEY").ok();
+    let auth_sock = std::env::var("SSH_AUTH_SOCK").ok();
+
+    if let Some(key_path) = key_path {
+        // If a normal (non-hardware-token) private key exists, sign directly.
+        if let Some(privkey) = read_private_key(&key_path)?
+            && !requires_agent(&privkey.algorithm())
+        {
+            let algo = privkey.algorithm();
+            let fingerprint = privkey.fingerprint(ssh_key::HashAlg::Sha256);
+            let comment = privkey.comment().to_string();
+            let builder = sshauth::TokenSigner::using_private_key(privkey)?;
+            return Ok(Some(Signer {
+                builder,
+                algo,
+                fingerprint,
+                comment,
+                source: key_path,
+            }));
+        }
+
+        // Otherwise delegate to the SSH agent: either the key is a
+        // hardware token (sk-*) or only the .pub file exists on disk.
+        let pubkey = read_public_key(&key_path)?;
+
+        // Delegate to the SSH agent for signing.
+        let auth_sock = auth_sock.as_deref().context(
+            "VARLINK_SSH_KEY requires agent-based signing (hardware token \
+             or public key only); set SSH_AUTH_SOCK",
+        )?;
+        let fp = pubkey.fingerprint(ssh_key::HashAlg::Sha256);
+        let agent_keys = sshauth::agent::list_keys(auth_sock)
+            .await
+            .context("listing ssh-agent keys")?;
+        if !agent_keys
+            .iter()
+            .any(|k| k.fingerprint(ssh_key::HashAlg::Sha256) == fp)
+        {
+            bail!(
+                "VARLINK_SSH_KEY key {fp} not found in ssh-agent; \
+                 add it with ssh-add or provide the private key"
+            );
+        }
+        let algo = pubkey.algorithm();
+        let comment = pubkey.comment().to_string();
+        let mut builder = sshauth::TokenSigner::using_authsock(auth_sock)?;
+        builder.key(pubkey);
+        return Ok(Some(Signer {
+            builder,
+            algo,
+            fingerprint: fp,
+            comment,
+            source: key_path,
+        }));
+    }
+
+    // SSH_AUTH_SOCK is set
+    if let Some(auth_sock) = auth_sock {
+        let keys = sshauth::agent::list_keys(&auth_sock)
+            .await
+            .context("listing ssh-agent keys")?;
+        let key = read_agent_key(keys)?;
+        let algo = key.algorithm();
+        let fingerprint = key.fingerprint(ssh_key::HashAlg::Sha256);
+        let comment = key.comment().to_string();
+        let mut builder = sshauth::TokenSigner::using_authsock(&auth_sock)?;
+        builder.key(key);
+        return Ok(Some(Signer {
+            builder,
+            algo,
+            fingerprint,
+            comment,
+            source: auth_sock,
+        }));
+    }
+
+    // No VARLINK_SSH_KEY or SSH_AUTH_SOCK
+    Ok(None)
 }
 
 fn generate_nonce() -> String {
@@ -106,7 +180,7 @@ fn generate_nonce() -> String {
 /// Picks the first supported (non-RSA) key, warning about any RSA keys found.
 fn read_agent_key(keys: Vec<ssh_key::PublicKey>) -> Result<ssh_key::PublicKey> {
     for k in &keys {
-        if matches!(k.algorithm(), ssh_key::Algorithm::Rsa { .. }) {
+        if ensure_supported_algorithm(&k.algorithm(), "ssh-agent key").is_err() {
             warn!(
                 "skipping RSA key {} ({}): RSA signing is not supported, use Ed25519 or ECDSA",
                 k.fingerprint(ssh_key::HashAlg::Sha256),
@@ -115,25 +189,63 @@ fn read_agent_key(keys: Vec<ssh_key::PublicKey>) -> Result<ssh_key::PublicKey> {
         }
     }
     keys.into_iter()
-        .find(|k| !matches!(k.algorithm(), ssh_key::Algorithm::Rsa { .. }))
-        .context("no Ed25519 or ECDSA key in ssh-agent (RSA is not supported)")
+        .find(|k| ensure_supported_algorithm(&k.algorithm(), "ssh-agent key").is_ok())
+        .context("no supported key in ssh-agent")
 }
 
 /// Read a private key from `key_path`.
 ///
 /// If the path ends in `.pub`, the corresponding private key path (without the
-/// extension) is tried instead.
-fn read_private_key(key_path: &str) -> Result<ssh_key::PrivateKey> {
+/// extension) is tried instead.  Returns `Ok(None)` when the private key file
+/// does not exist.
+#[allow(clippy::case_sensitive_file_extension_comparisons)]
+fn read_private_key(key_path: &str) -> Result<Option<ssh_key::PrivateKey>> {
     let privkey_path = key_path.strip_suffix(".pub").unwrap_or(key_path);
-    let pem = std::fs::read_to_string(privkey_path)
-        .with_context(|| format!("reading private key from {privkey_path}"))?;
+    let pem = match std::fs::read_to_string(privkey_path) {
+        Ok(pem) => pem,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => {
+            return Err(
+                anyhow::Error::new(e).context(format!("reading private key from {privkey_path}"))
+            );
+        }
+    };
     let privkey = ssh_key::PrivateKey::from_openssh(pem.trim())
         .with_context(|| format!("parsing private key from {privkey_path}"))?;
+    ensure_supported_algorithm(&privkey.algorithm(), key_path)?;
+    Ok(Some(privkey))
+}
 
-    if matches!(privkey.algorithm(), ssh_key::Algorithm::Rsa { .. }) {
-        bail!(
-            "VARLINK_SSH_KEY={key_path} is an RSA key, which is not supported; use Ed25519 or ECDSA"
-        );
+/// Read a public key from `key_path`.
+///
+/// If the path does not end in `.pub`, the `.pub` extension is appended.
+#[allow(clippy::case_sensitive_file_extension_comparisons)]
+fn read_public_key(key_path: &str) -> Result<ssh_key::PublicKey> {
+    let pubkey_path = if key_path.ends_with(".pub") {
+        key_path.to_string()
+    } else {
+        format!("{key_path}.pub")
+    };
+    let data = std::fs::read_to_string(&pubkey_path)
+        .with_context(|| format!("reading public key from {pubkey_path}"))?;
+    let pubkey = ssh_key::PublicKey::from_openssh(data.trim())
+        .with_context(|| format!("parsing public key from {pubkey_path}"))?;
+    ensure_supported_algorithm(&pubkey.algorithm(), key_path)?;
+    Ok(pubkey)
+}
+
+fn ensure_supported_algorithm(algo: &ssh_key::Algorithm, source: &str) -> Result<()> {
+    if matches!(algo, ssh_key::Algorithm::Rsa { .. }) {
+        bail!("{source} is an RSA key, which is not supported; use Ed25519 or ECDSA");
     }
-    Ok(privkey)
+    Ok(())
+}
+
+/// Hardware-token key algorithms (FIDO2 sk-*) that cannot sign directly
+/// and must be delegated to the SSH agent.
+fn requires_agent(algo: &ssh_key::Algorithm) -> bool {
+    matches!(
+        algo,
+        ssh_key::Algorithm::SkEcdsaSha2NistP256 | ssh_key::Algorithm::SkEd25519
+    )
 }
