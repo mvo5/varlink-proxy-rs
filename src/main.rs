@@ -671,32 +671,32 @@ struct BridgeCli {
 
 fn print_help() {
     eprint!(indoc::indoc! {"
-        Usage: varlink-http-bridge [OPTIONS] [VARLINK_SOCKETS_PATH]
+        Usage: varlink-httpd [bridge] [OPTIONS] [VARLINK_SOCKETS_PATH]
+               varlink-httpd import-ssh SOURCE [OUTPUT]
 
-        A proxy for Varlink sockets.
-
-        Positional arguments:
-          VARLINK_SOCKETS_PATH  directory of sockets or a single socket
-                                (default: /run/varlink/registry)
-
-        Options:
-          --bind=ADDR             address to bind HTTP server to (default: 0.0.0.0:1031)
-          --cert=PATH             path to TLS certificate PEM file
-          --key=PATH              path to TLS private key PEM file
-          --trust=PATH            path to CA certificate PEM for client verification (mTLS)
-          --authorized-keys=PATH  path to authorized SSH public keys file
-          --insecure              allow running without any authentication (DANGEROUS)
-          --help                  display this help and exit
+        A HTTP/WebSocket daemon for varlink sockets.
 
         Subcommands:
-          import-ssh SOURCE [OUTPUT]  download SSH authorized keys from a URL
+          bridge (default)                  start the HTTP/WebSocket server
+          import-ssh SOURCE [OUTPUT]        download SSH authorized keys from a URL
+
+        Bridge options:
+          VARLINK_SOCKETS_PATH              directory of sockets or a single socket
+                                            (default: /run/varlink/registry)
+          --bind=ADDR                       address to bind to (default: 0.0.0.0:1031)
+          --cert=PATH                       TLS certificate PEM file
+          --key=PATH                        TLS private key PEM file
+          --trust=PATH                      CA certificate PEM for client verification (mTLS)
+          --authorized-keys=PATH            authorized SSH public keys file
+          --insecure                        run without any authentication (DANGEROUS)
+          --help                            display this help and exit
     "});
 }
 
 #[cfg(feature = "sshauth")]
 fn print_import_ssh_help() {
     eprint!(indoc::indoc! {"
-        Usage: varlink-http-bridge import-ssh SOURCE [OUTPUT]
+        Usage: varlink-httpd import-ssh SOURCE [OUTPUT]
 
         Download SSH authorized keys from a URL and save to a local file.
 
@@ -737,6 +737,10 @@ fn parse_cli() -> anyhow::Result<Command> {
             #[cfg(feature = "sshauth")]
             Value(val) if !got_positional && val == "import-ssh" => {
                 return parse_import_ssh_args(&mut parser);
+            }
+            Value(val) if !got_positional && val == "bridge" => {
+                // explicit "bridge" subcommand — just consume the keyword
+                got_positional = false;
             }
             Value(val) if !got_positional => {
                 varlink_sockets_path = val.parse()?;
@@ -794,7 +798,7 @@ async fn main() -> anyhow::Result<()> {
         Command::Bridge(cli) => cli,
     };
 
-    // run with e.g. "systemd-socket-activate -l 127.0.0.1:1031 -- varlink-http-bridge"
+    // run with e.g. "systemd-socket-activate -l 127.0.0.1:1031 -- varlink-httpd"
     let mut listenfd = ListenFd::from_env();
     let listener = if let Some(std_listener) = listenfd.take_tcp_listener(0)? {
         // needed or tokio panics, see https://github.com/mitsuhiko/listenfd/pull/23
