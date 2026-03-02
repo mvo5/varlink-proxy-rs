@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: LGPL-2.1-or-later
+
 use anyhow::{Context, Result, bail};
 use log::{debug, warn};
 use varlink_http_bridge::SSHAUTH_MAGIC_PREFIX;

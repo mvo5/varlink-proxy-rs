@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: LGPL-2.1-or-later
+
 use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::os::fd::{FromRawFd, OwnedFd};

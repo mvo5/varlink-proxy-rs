@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: LGPL-2.1-or-later
+
 use super::*;
 use futures_util::{SinkExt, StreamExt};
 use gethostname::gethostname;
