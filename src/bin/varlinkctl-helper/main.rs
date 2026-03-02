@@ -16,16 +16,6 @@ use tungstenite::{Message, WebSocket};
 #[cfg(feature = "sshauth")]
 mod sshauth_client;
 
-#[cfg(feature = "sshauth")]
-use sshauth_client::maybe_add_auth_headers;
-#[cfg(not(feature = "sshauth"))]
-fn maybe_add_auth_headers(
-    _request: &mut tungstenite::http::Request<()>,
-    _uri: &tungstenite::http::Uri,
-) -> Result<()> {
-    Ok(())
-}
-
 enum Stream {
     Plain(TcpStream),
     Tls(openssl::ssl::SslStream<TcpStream>),
@@ -109,7 +99,25 @@ fn build_ssl_connector() -> Result<SslConnector> {
     Ok(builder.build())
 }
 
+#[cfg(feature = "sshauth")]
 fn connect_ws(url: &str) -> Result<Ws> {
+    sshauth_client::connect_with_ssh_retry(|key| {
+        connect_ws_once(url, |req, uri| match key {
+            Some(k) => sshauth_client::add_auth_headers(req, uri, k),
+            None => Ok(()),
+        })
+    })
+}
+
+#[cfg(not(feature = "sshauth"))]
+fn connect_ws(url: &str) -> Result<Ws> {
+    connect_ws_once(url, |_, _| Ok(()))
+}
+
+fn connect_ws_once(
+    url: &str,
+    add_headers: impl FnOnce(&mut tungstenite::http::Request<()>, &tungstenite::http::Uri) -> Result<()>,
+) -> Result<Ws> {
     use tungstenite::client::IntoClientRequest;
 
     let ws_url = if let Some(rest) = url.strip_prefix("https://") {
@@ -137,15 +145,11 @@ fn connect_ws(url: &str) -> Result<Ws> {
             Stream::Plain(tcp)
         };
 
-    // Use into_client_request() here as it auto-generates standard WS upgrade headers,
-    // then we add our auth headers too
     let mut request = ws_url
         .into_client_request()
         .context("building WS request")?;
 
-    // this adds ssh auth headers if ssh-agent is available, once we have more auth methods
-    // it may add more
-    maybe_add_auth_headers(&mut request, &uri)?;
+    add_headers(&mut request, &uri)?;
 
     let ws_context = if use_tls {
         "WebSocket handshake failed: check client cert if server requires mTLS"
