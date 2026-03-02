@@ -25,8 +25,8 @@ check: check_srv_binary_size check_helper_binary_size
 	cargo fmt --check
 	cargo clippy -- -W clippy::pedantic
 
-test:
-	cargo test
+test *args:
+	cargo test {{args}}
 
 # the httpd service
 srv_binary := "target/release/varlink-http-bridge"
@@ -59,3 +59,22 @@ check_helper_binary_size:
 	  echo "ERROR: release varlinkctl-helper binary exceeds limit"
 	  exit 1
 	fi
+
+container_image := "varlink-http-bridge-test"
+container_name := "vhb-test"
+
+# Run cargo test inside a Fedora system container (systemd as PID 1)
+[script]
+test-in-container *args:
+	if ! podman image exists "{{container_image}}"; then
+	  podman build -t "{{container_image}}" -f Containerfile.test .
+	fi
+	podman rm -f "{{container_name}}" 2>/dev/null || true
+	trap 'podman rm -f "{{container_name}}"' EXIT
+	podman run -d --systemd=true \
+	  --name "{{container_name}}" \
+	  -v .:/srv/varlink-http-bridge:z \
+	  -w /srv/varlink-http-bridge \
+	  "{{container_image}}"
+	podman exec "{{container_name}}" systemctl is-system-running --wait || true
+	podman exec "{{container_name}}" cargo test {{args}}
