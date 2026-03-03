@@ -48,10 +48,10 @@ async fn run_test_server_with_auth(
     (task_handle, local_addr)
 }
 
-#[test_with::path(/run/systemd/io.systemd.Hostname)]
+#[test_with::path(/run/varlink/registry/io.systemd.Hostname)]
 #[tokio::test]
 async fn test_integration_real_systemd_hostname_post() {
-    let (server, local_addr) = run_test_server("/run/systemd").await;
+    let (server, local_addr) = run_test_server("/run/varlink/registry").await;
     defer! {
         server.abort();
     };
@@ -71,10 +71,10 @@ async fn test_integration_real_systemd_hostname_post() {
     assert!(body["Hostname"].as_str().is_some_and(|h| !h.is_empty()));
 }
 
-#[test_with::path(/run/systemd/io.systemd.Hostname)]
+#[test_with::path(/run/varlink/registry/io.systemd.Hostname)]
 #[tokio::test]
 async fn test_integration_real_systemd_socket_get() {
-    let (server, local_addr) = run_test_server("/run/systemd").await;
+    let (server, local_addr) = run_test_server("/run/varlink/registry").await;
     defer! {
         server.abort();
     };
@@ -90,10 +90,10 @@ async fn test_integration_real_systemd_socket_get() {
     assert_eq!(body["product"], "systemd (systemd-hostnamed)");
 }
 
-#[test_with::path(/run/systemd/io.systemd.Hostname)]
+#[test_with::path(/run/varlink/registry/io.systemd.Hostname)]
 #[tokio::test]
 async fn test_integration_real_systemd_sockets_get() {
-    let (server, local_addr) = run_test_server("/run/systemd").await;
+    let (server, local_addr) = run_test_server("/run/varlink/registry").await;
     defer! {
         server.abort();
     };
@@ -114,10 +114,10 @@ async fn test_integration_real_systemd_sockets_get() {
     );
 }
 
-#[test_with::path(/run/systemd/io.systemd.Hostname)]
+#[test_with::path(/run/varlink/registry/io.systemd.Hostname)]
 #[tokio::test]
 async fn test_integration_real_systemd_socket_interface_get() {
-    let (server, local_addr) = run_test_server("/run/systemd").await;
+    let (server, local_addr) = run_test_server("/run/varlink/registry").await;
     defer! {
         server.abort();
     };
@@ -136,10 +136,10 @@ async fn test_integration_real_systemd_socket_interface_get() {
     assert_eq!(body.get("method_names").unwrap(), &json!(["Describe"]));
 }
 
-#[test_with::path(/run/systemd/io.systemd.Hostname)]
+#[test_with::path(/run/varlink/registry/io.systemd.Hostname)]
 #[tokio::test]
 async fn test_integration_real_systemd_hostname_parallel() {
-    let (server, local_addr) = run_test_server("/run/systemd").await;
+    let (server, local_addr) = run_test_server("/run/varlink/registry").await;
     defer! {
         server.abort();
     };
@@ -178,10 +178,10 @@ async fn test_integration_real_systemd_hostname_parallel() {
     assert_eq!(count, NUM_TASKS);
 }
 
-#[test_with::path(/run/systemd/io.systemd.Hostname)]
+#[test_with::path(/run/varlink/registry/io.systemd.Hostname)]
 #[tokio::test]
 async fn test_integration_real_systemd_socket_query_param() {
-    let (server, local_addr) = run_test_server("/run/systemd").await;
+    let (server, local_addr) = run_test_server("/run/varlink/registry").await;
     defer! {
         server.abort();
     };
@@ -201,10 +201,10 @@ async fn test_integration_real_systemd_socket_query_param() {
     assert_eq!(body["product"], "systemd (systemd-hostnamed)");
 }
 
-#[test_with::path(/run/systemd)]
+#[test_with::path(/run/varlink/registry)]
 #[tokio::test]
 async fn test_error_bad_request_on_malformed_json() {
-    let (server, local_addr) = run_test_server("/run/systemd").await;
+    let (server, local_addr) = run_test_server("/run/varlink/registry").await;
     defer! {
         server.abort();
     };
@@ -224,10 +224,10 @@ async fn test_error_bad_request_on_malformed_json() {
     assert_eq!(res.status(), StatusCode::BAD_REQUEST);
 }
 
-#[test_with::path(/run/systemd)]
+#[test_with::path(/run/varlink/registry)]
 #[tokio::test]
 async fn test_error_unknown_varlink_address() {
-    let (server, local_addr) = run_test_server("/run/systemd").await;
+    let (server, local_addr) = run_test_server("/run/varlink/registry").await;
     defer! {
         server.abort();
     };
@@ -250,10 +250,10 @@ async fn test_error_unknown_varlink_address() {
     assert_eq!(body["error"], "IO error");
 }
 
-#[test_with::path(/run/systemd/io.systemd.Hostname)]
+#[test_with::path(/run/varlink/registry/io.systemd.Hostname)]
 #[tokio::test]
 async fn test_error_404_for_missing_method() {
-    let (server, local_addr) = run_test_server("/run/systemd").await;
+    let (server, local_addr) = run_test_server("/run/varlink/registry").await;
     defer! {
         server.abort();
     };
@@ -274,10 +274,10 @@ async fn test_error_404_for_missing_method() {
     assert_eq!(body["error"], "Method not found: 'com.missing.Call'");
 }
 
-#[test_with::path(/run/systemd)]
+#[test_with::path(/run/varlink/registry)]
 #[tokio::test]
 async fn test_error_bad_request_for_unclean_address() {
-    let (server, local_addr) = run_test_server("/run/systemd").await;
+    let (server, local_addr) = run_test_server("/run/varlink/registry").await;
     defer! {
         server.abort();
     };
@@ -302,10 +302,10 @@ async fn test_error_bad_request_for_unclean_address() {
     );
 }
 
-#[test_with::path(/run/systemd)]
+#[test_with::path(/run/varlink/registry)]
 #[tokio::test]
 async fn test_error_bad_request_for_invalid_chars_in_address() {
-    let (server, local_addr) = run_test_server("/run/systemd").await;
+    let (server, local_addr) = run_test_server("/run/varlink/registry").await;
     defer! {
         server.abort();
     };
@@ -330,10 +330,10 @@ async fn test_error_bad_request_for_invalid_chars_in_address() {
     );
 }
 
-#[test_with::path(/run/systemd)]
+#[test_with::path(/run/varlink/registry)]
 #[tokio::test]
 async fn test_error_bad_request_for_method_without_dots() {
-    let (server, local_addr) = run_test_server("/run/systemd").await;
+    let (server, local_addr) = run_test_server("/run/varlink/registry").await;
     defer! {
         server.abort();
     };
@@ -354,10 +354,10 @@ async fn test_error_bad_request_for_method_without_dots() {
     );
 }
 
-#[test_with::path(/run/systemd)]
+#[test_with::path(/run/varlink/registry)]
 #[tokio::test]
 async fn test_health_endpoint() {
-    let (server, local_addr) = run_test_server("/run/systemd").await;
+    let (server, local_addr) = run_test_server("/run/varlink/registry").await;
     defer! {
         server.abort();
     };
@@ -389,10 +389,10 @@ async fn test_varlink_sockets_dir_or_file_missing() {
     );
 }
 
-#[test_with::path(/run/systemd/io.systemd.Hostname)]
+#[test_with::path(/run/varlink/registry/io.systemd.Hostname)]
 #[tokio::test]
 async fn test_single_socket_post() {
-    let (server, local_addr) = run_test_server("/run/systemd/io.systemd.Hostname").await;
+    let (server, local_addr) = run_test_server("/run/varlink/registry/io.systemd.Hostname").await;
     defer! {
         server.abort();
     };
@@ -412,10 +412,10 @@ async fn test_single_socket_post() {
     assert!(body["Hostname"].as_str().is_some_and(|h| !h.is_empty()));
 }
 
-#[test_with::path(/run/systemd/io.systemd.Hostname)]
+#[test_with::path(/run/varlink/registry/io.systemd.Hostname)]
 #[tokio::test]
 async fn test_single_socket_rejects_wrong_name() {
-    let (server, local_addr) = run_test_server("/run/systemd/io.systemd.Hostname").await;
+    let (server, local_addr) = run_test_server("/run/varlink/registry/io.systemd.Hostname").await;
     defer! {
         server.abort();
     };
@@ -438,13 +438,13 @@ async fn test_single_socket_rejects_wrong_name() {
     );
 }
 
-#[test_with::path(/run/systemd/io.systemd.Hostname)]
+#[test_with::path(/run/varlink/registry/io.systemd.Hostname)]
 #[tokio::test]
 async fn test_varlink_unix_sockets_in_follows_symlinks() {
     let tmpdir = tempfile::tempdir().expect("failed to create tempdir");
     let symlink_path = tmpdir.path().join("io.systemd.Hostname");
 
-    std::os::unix::fs::symlink("/run/systemd/io.systemd.Hostname", &symlink_path)
+    std::os::unix::fs::symlink("/run/varlink/registry/io.systemd.Hostname", &symlink_path)
         .expect("failed to create symlink");
 
     let dir_fd = OwnedFd::from(std::fs::File::open(tmpdir.path()).unwrap());
@@ -453,13 +453,13 @@ async fn test_varlink_unix_sockets_in_follows_symlinks() {
     assert_eq!(sockets, vec!["io.systemd.Hostname"]);
 }
 
-#[test_with::path(/run/systemd/io.systemd.Hostname)]
+#[test_with::path(/run/varlink/registry/io.systemd.Hostname)]
 #[tokio::test]
 async fn test_varlink_unix_sockets_in_skips_dangling_symlinks() {
     let tmpdir = tempfile::tempdir().expect("failed to create tempdir");
 
     let good = tmpdir.path().join("io.systemd.Hostname");
-    std::os::unix::fs::symlink("/run/systemd/io.systemd.Hostname", &good)
+    std::os::unix::fs::symlink("/run/varlink/registry/io.systemd.Hostname", &good)
         .expect("failed to create symlink");
 
     let bad = tmpdir.path().join("io.example.Bad");
@@ -474,10 +474,10 @@ async fn test_varlink_unix_sockets_in_skips_dangling_symlinks() {
     assert_eq!(sockets, vec!["io.systemd.Hostname"]);
 }
 
-#[test_with::path(/run/systemd/io.systemd.Hostname)]
+#[test_with::path(/run/varlink/registry/io.systemd.Hostname)]
 #[tokio::test]
 async fn test_ws_hostname_describe() {
-    let (server, local_addr) = run_test_server("/run/systemd").await;
+    let (server, local_addr) = run_test_server("/run/varlink/registry").await;
     defer! {
         server.abort();
     };
@@ -508,15 +508,15 @@ async fn test_ws_hostname_describe() {
     assert_eq!(body["parameters"]["Hostname"], expected_hostname);
 }
 
-#[test_with::path(/run/systemd/userdb/io.systemd.Multiplexer)]
+#[test_with::path(/run/varlink/registry/io.systemd.UserDatabase)]
 #[tokio::test]
 async fn test_ws_userdb_get_user_record_more() {
-    let (server, local_addr) = run_test_server("/run/systemd/userdb").await;
+    let (server, local_addr) = run_test_server("/run/varlink/registry").await;
     defer! {
         server.abort();
     };
 
-    let url = format!("ws://{local_addr}/ws/sockets/io.systemd.Multiplexer");
+    let url = format!("ws://{local_addr}/ws/sockets/io.systemd.UserDatabase");
     let (mut ws, _) = tokio_tungstenite::connect_async(&url)
         .await
         .expect("WS connect failed");
@@ -571,10 +571,10 @@ async fn test_ws_userdb_get_user_record_more() {
 }
 
 #[test_with::path(/usr/bin/varlinkctl)]
-#[test_with::path(/run/systemd/io.systemd.Hostname)]
+#[test_with::path(/run/varlink/registry/io.systemd.Hostname)]
 #[tokio::test]
 async fn test_varlinkctl_helper_hostname_describe() {
-    let (server, local_addr) = run_test_server("/run/systemd").await;
+    let (server, local_addr) = run_test_server("/run/varlink/registry").await;
     defer! {
         server.abort();
     };
@@ -609,15 +609,15 @@ async fn test_varlinkctl_helper_hostname_describe() {
 }
 
 #[test_with::path(/usr/bin/varlinkctl)]
-#[test_with::path(/run/systemd/userdb/io.systemd.Multiplexer)]
+#[test_with::path(/run/varlink/registry/io.systemd.UserDatabase)]
 #[tokio::test]
 async fn test_varlinkctl_helper_userdb_get_user_record() {
-    let (server, local_addr) = run_test_server("/run/systemd/userdb").await;
+    let (server, local_addr) = run_test_server("/run/varlink/registry").await;
     defer! {
         server.abort();
     };
 
-    let bridge_url = format!("http://{local_addr}/ws/sockets/io.systemd.Multiplexer");
+    let bridge_url = format!("http://{local_addr}/ws/sockets/io.systemd.UserDatabase");
     let output = tokio::process::Command::new("varlinkctl")
         .args([
             "call",
@@ -897,7 +897,7 @@ async fn test_tls_credentials_directory_fallback() {
 }
 
 #[test_with::path(/usr/bin/varlinkctl)]
-#[test_with::path(/run/systemd/io.systemd.Hostname)]
+#[test_with::path(/run/varlink/registry/io.systemd.Hostname)]
 #[tokio::test]
 async fn test_varlinkctl_helper_mtls_hostname_describe() {
     let pki = make_test_pki();
@@ -909,7 +909,7 @@ async fn test_varlinkctl_helper_mtls_hostname_describe() {
     )
     .unwrap();
 
-    let (server, local_addr) = run_test_tls_server("/run/systemd", acceptor).await;
+    let (server, local_addr) = run_test_tls_server("/run/varlink/registry", acceptor).await;
     defer! {
         server.abort();
     };
@@ -956,7 +956,7 @@ async fn test_varlinkctl_helper_mtls_hostname_describe() {
 }
 
 #[test_with::path(/usr/bin/varlinkctl)]
-#[test_with::path(/run/systemd/io.systemd.Hostname)]
+#[test_with::path(/run/varlink/registry/io.systemd.Hostname)]
 #[tokio::test]
 async fn test_varlinkctl_helper_mtls_no_client_cert() {
     let pki = make_test_pki();
@@ -968,7 +968,7 @@ async fn test_varlinkctl_helper_mtls_no_client_cert() {
     )
     .unwrap();
 
-    let (server, local_addr) = run_test_tls_server("/run/systemd", acceptor).await;
+    let (server, local_addr) = run_test_tls_server("/run/varlink/registry", acceptor).await;
     defer! {
         server.abort();
     };

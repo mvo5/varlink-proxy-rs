@@ -19,4 +19,4 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - uses: extractions/setup-just@v3
-      - run: just test
+      - run: just test-in-container

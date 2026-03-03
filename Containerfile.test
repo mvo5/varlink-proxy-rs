@@ -1,0 +1,4 @@
+# SPDX-License-Identifier: LGPL-2.1-or-later
+FROM registry.fedoraproject.org/fedora:44
+RUN dnf install -y systemd cargo rust gcc openssl-devel openssl openssh-clients pkg-config && dnf clean all
+CMD ["/sbin/init"]
