@@ -239,6 +239,7 @@ impl Authenticator for SshKeyAuthenticator {
         path: &str,
         auth_header: &str,
         nonce: Option<&str>,
+        tls_channel_binding: Option<&str>,
     ) -> anyhow::Result<()> {
         self.maybe_reload();
 
@@ -265,6 +266,10 @@ impl Authenticator for SshKeyAuthenticator {
             .action("method", method)
             .action("path", path)
             .action("nonce", nonce)
+            .action(
+                "tls-channel-binding",
+                tls_channel_binding.unwrap_or_default(),
+            )
             .with_keys(&authorized_keys)
             .context("token verification failed")?;
 

@@ -4,7 +4,7 @@ use anyhow::{Context, bail};
 use axum::{
     Router,
     extract::ws::{Message, WebSocket, WebSocketUpgrade},
-    extract::{DefaultBodyLimit, Path, Query, State},
+    extract::{ConnectInfo, DefaultBodyLimit, Path, Query, State},
     http::StatusCode,
     middleware::Next,
     response::{IntoResponse, Response},
@@ -244,6 +244,33 @@ impl axum::serve::Listener for TlsListener {
     }
 }
 
+#[derive(Clone)]
+struct TlsConnectionInfo {
+    tls_channel_binding: Option<String>,
+}
+
+use axum::extract::connect_info::Connected;
+use axum::serve::IncomingStream;
+
+impl Connected<IncomingStream<'_, TlsListener>> for TlsConnectionInfo {
+    fn connect_info(target: IncomingStream<'_, TlsListener>) -> Self {
+        use varlink_http_bridge::{TLS_CHANNEL_BINDING_LABEL, TLS_CHANNEL_BINDING_LEN};
+
+        let mut buf = [0u8; TLS_CHANNEL_BINDING_LEN];
+        target
+            .io()
+            .ssl()
+            .export_keying_material(&mut buf, TLS_CHANNEL_BINDING_LABEL, Some(&[]))
+            // this should never fail after the connection is established
+            // unless something else is in a catastrophic state (like
+            // OOM)
+            .expect("export_keying_material must succeed after TLS 1.3 handshake");
+        TlsConnectionInfo {
+            tls_channel_binding: Some(openssl::base64::encode_block(&buf)),
+        }
+    }
+}
+
 fn load_tls_acceptor(
     cert_path: &str,
     key_path: &str,
@@ -303,6 +330,7 @@ trait Authenticator: Send + Sync {
         path: &str,
         auth_header: &str,
         nonce: Option<&str>,
+        channel_binding: Option<&str>,
     ) -> anyhow::Result<()>;
 }
 
@@ -337,6 +365,11 @@ async fn auth_middleware(
 
     let nonce = extract_nonce(request.headers());
 
+    let tls_channel_binding: Option<String> = request
+        .extensions()
+        .get::<ConnectInfo<TlsConnectionInfo>>()
+        .and_then(|ci| ci.0.tls_channel_binding.clone());
+
     let method = request.method().as_str().to_string();
     let path = request
         .uri()
@@ -346,7 +379,13 @@ async fn auth_middleware(
 
     let mut errors = Vec::new();
     for authenticator in state.authenticators.iter() {
-        match authenticator.check_request(&method, &path, &auth_header, nonce.as_deref()) {
+        match authenticator.check_request(
+            &method,
+            &path,
+            &auth_header,
+            nonce.as_deref(),
+            tls_channel_binding.as_deref(),
+        ) {
             Ok(()) => return next.run(request).await,
             Err(e) => errors.push(e.to_string()),
         }
@@ -639,9 +678,12 @@ async fn run_server(
             inner: listener,
             acceptor,
         };
-        axum::serve(tls_listener, app)
-            .with_graceful_shutdown(shutdown_signal())
-            .await?;
+        axum::serve(
+            tls_listener,
+            app.into_make_service_with_connect_info::<TlsConnectionInfo>(),
+        )
+        .with_graceful_shutdown(shutdown_signal())
+        .await?;
     } else {
         axum::serve(listener, app)
             .with_graceful_shutdown(shutdown_signal())
