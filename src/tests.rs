@@ -9,7 +9,7 @@ use std::os::fd::OwnedFd;
 use tokio::task::JoinSet;
 use tokio_tungstenite::tungstenite::Message as WsMsg;
 
-/// Path to the varlinkctl-helper binary built by cargo alongside the test binary.
+/// Path to the varlinkctl-http binary built by cargo alongside the test binary.
 fn helper_binary() -> std::path::PathBuf {
     let test_exe = std::env::current_exe().expect("failed to get test exe path");
     // test binary is in target/debug/deps/, helper is in target/debug/
@@ -18,7 +18,7 @@ fn helper_binary() -> std::path::PathBuf {
         .unwrap()
         .parent()
         .unwrap()
-        .join("varlinkctl-helper")
+        .join("varlinkctl-http")
 }
 
 async fn run_test_server(
@@ -915,7 +915,7 @@ async fn test_varlinkctl_helper_mtls_hostname_describe() {
     };
 
     let fake_xdg_home = tempfile::tempdir().unwrap();
-    let tls_dir = fake_xdg_home.path().join("varlink-http-bridge");
+    let tls_dir = fake_xdg_home.path().join("varlink-httpd");
     std::fs::create_dir_all(&tls_dir).unwrap();
     std::fs::copy(&pki.client_cert_path, tls_dir.join("client-cert-file")).unwrap();
     std::fs::copy(&pki.client_key_path, tls_dir.join("client-key-file")).unwrap();
@@ -975,7 +975,7 @@ async fn test_varlinkctl_helper_mtls_no_client_cert() {
 
     // Provide the server CA (so the client trusts the server) but NO client cert/key
     let fake_xdg_home = tempfile::tempdir().unwrap();
-    let tls_dir = fake_xdg_home.path().join("varlink-http-bridge");
+    let tls_dir = fake_xdg_home.path().join("varlink-httpd");
     std::fs::create_dir_all(&tls_dir).unwrap();
     std::fs::copy(&pki.ca_cert_path, tls_dir.join("server-ca-file")).unwrap();
 
@@ -1026,11 +1026,11 @@ mod sshauth_tests {
     use super::*;
     use crate::maybe_create_ssh_authenticator;
 
-    /// Create a fake rootdir with an `etc/varlink-http-bridge/authorized_keys` file.
+    /// Create a fake rootdir with an `etc/varlink-httpd/authorized_keys` file.
     fn make_test_rootdir_with_keys(pubkeys: &[&str]) -> tempfile::TempDir {
         use std::io::Write;
         let root = tempfile::tempdir().unwrap();
-        let dir = root.path().join("etc/varlink-http-bridge");
+        let dir = root.path().join("etc/varlink-httpd");
         std::fs::create_dir_all(&dir).unwrap();
         let mut f = std::fs::File::create(dir.join("authorized_keys")).unwrap();
         for key in pubkeys {
@@ -1283,7 +1283,7 @@ mod sshauth_tests {
                 Request::get("/sockets")
                     .header("Authorization", "Bearer bogus-token")
                     .header(
-                        varlink_http_bridge::SSHAUTH_NONCE_HEADER,
+                        varlink_httpd::SSHAUTH_NONCE_HEADER,
                         "a-nonce-long-enough-1234",
                     )
                     .body(Body::empty())
@@ -1477,7 +1477,7 @@ mod sshauth_tests {
         let result = maybe_create_ssh_authenticator(None, None, empty_root.path()).unwrap();
         assert!(result.is_none(), "empty rootdir should yield None");
 
-        // 2. rootdir/etc/varlink-http-bridge/authorized_keys exists → found
+        // 2. rootdir/etc/varlink-httpd/authorized_keys exists → found
         let root = make_test_rootdir_with_keys(&[pubkey_a.trim()]);
         let auth = maybe_create_ssh_authenticator(None, None, root.path())
             .unwrap()
@@ -1500,7 +1500,7 @@ mod sshauth_tests {
 
         // 4. Both /etc and /run exist → /etc takes priority (1 key vs 2 keys)
         let root_both = tempfile::tempdir().unwrap();
-        let etc_dir = root_both.path().join("etc/varlink-http-bridge");
+        let etc_dir = root_both.path().join("etc/varlink-httpd");
         std::fs::create_dir_all(&etc_dir).unwrap();
         std::fs::write(etc_dir.join("authorized_keys"), pubkey_a.as_bytes()).unwrap();
         let run_dir = root_both.path().join("run/credentials/@system");
@@ -1540,6 +1540,65 @@ mod sshauth_tests {
             auth.key_count(),
             1,
             "creds_dir (1 key) should take priority over /run (2 keys)"
+        );
+
+        // 5b. ssh.ephemeral-authorized_keys-all is used when .root is absent (creds_dir)
+        let creds_dir_all = tempfile::tempdir().unwrap();
+        std::fs::write(
+            creds_dir_all
+                .path()
+                .join("ssh.ephemeral-authorized_keys-all"),
+            pubkey_a.as_bytes(),
+        )
+        .unwrap();
+        let auth =
+            maybe_create_ssh_authenticator(None, Some(creds_dir_all.path()), empty_root.path())
+                .unwrap()
+                .unwrap();
+        assert_eq!(auth.key_count(), 1, "should find key from .all credential");
+
+        // 5c. ssh.authorized_keys.root takes priority over .all (creds_dir)
+        let creds_dir_both = tempfile::tempdir().unwrap();
+        std::fs::write(
+            creds_dir_both.path().join("ssh.authorized_keys.root"),
+            pubkey_a.as_bytes(),
+        )
+        .unwrap();
+        let mut all_file = std::fs::File::create(
+            creds_dir_both
+                .path()
+                .join("ssh.ephemeral-authorized_keys-all"),
+        )
+        .unwrap();
+        writeln!(all_file, "{}", pubkey_b1.trim()).unwrap();
+        writeln!(all_file, "{}", pubkey_b2.trim()).unwrap();
+        drop(all_file);
+        let auth =
+            maybe_create_ssh_authenticator(None, Some(creds_dir_both.path()), empty_root.path())
+                .unwrap()
+                .unwrap();
+        assert_eq!(
+            auth.key_count(),
+            1,
+            ".root (1 key) should take priority over .all (2 keys)"
+        );
+
+        // 5d. ssh.ephemeral-authorized_keys-all in /run/credentials/@system
+        let root_run_all = tempfile::tempdir().unwrap();
+        let run_dir = root_run_all.path().join("run/credentials/@system");
+        std::fs::create_dir_all(&run_dir).unwrap();
+        std::fs::write(
+            run_dir.join("ssh.ephemeral-authorized_keys-all"),
+            pubkey_a.as_bytes(),
+        )
+        .unwrap();
+        let auth = maybe_create_ssh_authenticator(None, None, root_run_all.path())
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            auth.key_count(),
+            1,
+            "should find key from .all in /run path"
         );
 
         // 6. CLI path overrides everything

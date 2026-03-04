@@ -69,15 +69,15 @@ fn ws_tcp_stream(ws: &Ws) -> &TcpStream {
 
 /// Build an `SslConnector` with client certs and a custom CA loaded from the
 /// first existing directory:
-/// 1. `$XDG_CONFIG_HOME/varlink-http-bridge/`
-/// 2. `~/.config/varlink-http-bridge/`
+/// 1. `$XDG_CONFIG_HOME/varlink-httpd/`
+/// 2. `~/.config/varlink-httpd/`
 /// 3. `$CREDENTIALS_DIRECTORY` (systemd, see systemd.exec(5))
 fn build_ssl_connector() -> Result<SslConnector> {
     let mut builder = SslConnector::builder(SslMethod::tls_client())?;
 
     let maybe_credentials_dirs = [
-        std::env::var_os("XDG_CONFIG_HOME").map(|d| PathBuf::from(d).join("varlink-http-bridge")),
-        std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config/varlink-http-bridge")),
+        std::env::var_os("XDG_CONFIG_HOME").map(|d| PathBuf::from(d).join("varlink-httpd")),
+        std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config/varlink-httpd")),
         std::env::var_os("CREDENTIALS_DIRECTORY").map(PathBuf::from),
     ];
     if let Some(dir) = maybe_credentials_dirs
