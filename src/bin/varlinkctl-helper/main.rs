@@ -115,17 +115,19 @@ fn build_ssl_connector() -> Result<SslConnector> {
     Ok(builder.build())
 }
 
-fn connect_ws(url: &str) -> Result<Ws> {
-    use tungstenite::client::IntoClientRequest;
-
-    let ws_url = if let Some(rest) = url.strip_prefix("https://") {
+fn to_ws_url(url: &str) -> String {
+    if let Some(rest) = url.strip_prefix("https://") {
         format!("wss://{rest}")
     } else if let Some(rest) = url.strip_prefix("http://") {
         format!("ws://{rest}")
     } else {
         url.to_string()
-    };
-    let uri: tungstenite::http::Uri = ws_url.parse().context("invalid WebSocket URL")?;
+    }
+}
+
+/// Establish a TCP connection (with optional TLS) and return the stream
+/// plus the TLS channel binding value (if TLS is used).
+fn connect_stream(uri: &tungstenite::http::Uri) -> Result<(Stream, Option<String>)> {
     let use_tls = uri.scheme_str() == Some("wss");
     let host = uri.host().context("URL has no host")?;
     let port = uri.port_u16().unwrap_or(if use_tls { 443 } else { 80 });
@@ -156,23 +158,82 @@ fn connect_ws(url: &str) -> Result<Ws> {
         Stream::Plain(_) => None,
     };
 
-    // Use into_client_request() here as it auto-generates standard WS upgrade headers,
-    // then we add our auth headers too
-    let mut request = ws_url
+    Ok((stream, tls_channel_binding))
+}
+
+fn connect_ws(url: &str) -> Result<Ws> {
+    use tungstenite::client::IntoClientRequest;
+
+    let ws_url = to_ws_url(url);
+    let uri: tungstenite::http::Uri = ws_url.parse().context("invalid WebSocket URL")?;
+    let use_tls = uri.scheme_str() == Some("wss");
+
+    // First attempt: connect without auth to get the server nonce via redirect
+    let (stream, _tls_cb) = connect_stream(&uri)?;
+    let request = ws_url
+        .as_str()
         .into_client_request()
         .context("building WS request")?;
 
-    // this adds ssh auth headers if ssh-agent is available, once we have more auth methods
-    // it may add more
-    maybe_add_auth_headers(&mut request, &uri, tls_channel_binding.as_deref())?;
+    use tungstenite::handshake::HandshakeError;
 
-    let ws_context = if use_tls {
-        "WebSocket handshake failed: check client cert if server requires mTLS"
-    } else {
-        "WebSocket handshake failed"
-    };
-    let (ws, _) = tungstenite::client(request, stream).context(ws_context)?;
-    Ok(ws)
+    match tungstenite::client(request, stream) {
+        Ok((ws, _)) => return Ok(ws), // no auth required
+        Err(HandshakeError::Failure(tungstenite::Error::Http(response)))
+            if response.status() == tungstenite::http::StatusCode::TEMPORARY_REDIRECT =>
+        {
+            // Server sent a redirect with a nonce — reconnect with auth
+            let location = response
+                .headers()
+                .get("location")
+                .context("307 redirect without Location header")?
+                .to_str()
+                .context("invalid Location header")?;
+
+            // Reconstruct the full WS URL from the redirect path
+            let redirected_ws_url = format!(
+                "{scheme}://{authority}{path}",
+                scheme = uri.scheme_str().unwrap_or("ws"),
+                authority = uri.authority().context("URL has no authority")?,
+                path = location,
+            );
+            let redirected_uri: tungstenite::http::Uri =
+                redirected_ws_url.parse().context("invalid redirect URL")?;
+
+            // New connection — new TLS session, new channel binding
+            let (stream, tls_cb) = connect_stream(&redirected_uri)?;
+
+            let mut request = redirected_ws_url
+                .as_str()
+                .into_client_request()
+                .context("building WS request for redirect")?;
+            maybe_add_auth_headers(&mut request, &redirected_uri, tls_cb.as_deref())?;
+
+            let ws_context = if use_tls {
+                "WebSocket handshake failed: check client cert if server requires mTLS"
+            } else {
+                "WebSocket handshake failed"
+            };
+            let (ws, _) = tungstenite::client(request, stream).context(ws_context)?;
+            Ok(ws)
+        }
+        Err(HandshakeError::Failure(tungstenite::Error::Http(response))) => {
+            let status = response.status();
+            let body = response
+                .into_body()
+                .map(|b| String::from_utf8_lossy(&b).to_string())
+                .unwrap_or_default();
+            bail!("WebSocket handshake failed: HTTP {status}: {body}");
+        }
+        Err(e) => {
+            let ws_context = if use_tls {
+                "WebSocket handshake failed: check client cert if server requires mTLS"
+            } else {
+                "WebSocket handshake failed"
+            };
+            Err(anyhow::Error::msg(format!("{e}"))).context(ws_context)
+        }
+    }
 }
 
 /// Forward all data from the WebSocket to fd3 until it would block or the peer closes.

@@ -1147,18 +1147,17 @@ mod sshauth_tests {
         let auth = auth.with_max_skew(0);
         let signer = make_test_token_signer(&key_path);
 
-        let nonce = "test-nonce-expired12345";
         let mut tb = signer.sign_for();
         tb.action("method", "GET")
             .action("path", "/sockets")
-            .action("nonce", nonce);
+            .action("tls-channel-binding", "");
         let token = tb.sign().await.unwrap();
 
         // Wait for the token to become stale (max_skew is 0)
         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
 
         let header = format!("Bearer {}", token.encode());
-        let result = auth.check_request("GET", "/sockets", &header, Some(nonce), None);
+        let result = auth.check_request("GET", "/sockets", &header, None);
         assert!(result.is_err(), "expired token should be rejected");
     }
 
@@ -1172,15 +1171,14 @@ mod sshauth_tests {
         let (_, key_path_b) = generate_ed25519_keypair(tmpdir_b.path());
         let signer = make_test_token_signer(&key_path_b);
 
-        let nonce = "test-nonce-unknown-fp12345";
         let mut tb = signer.sign_for();
         tb.action("method", "GET")
             .action("path", "/sockets")
-            .action("nonce", nonce);
+            .action("tls-channel-binding", "");
         let token = tb.sign().await.unwrap();
 
         let header = format!("Bearer {}", token.encode());
-        let result = auth.check_request("GET", "/sockets", &header, Some(nonce), None);
+        let result = auth.check_request("GET", "/sockets", &header, None);
         assert!(result.is_err());
         assert!(
             result
@@ -1195,23 +1193,21 @@ mod sshauth_tests {
         let (auth, key_path) = make_test_ssh_auth();
         let signer = make_test_token_signer(&key_path);
 
-        let nonce = "test-nonce-verify12345";
         let cb = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
 
         let mut tb = signer.sign_for();
         tb.action("method", "GET")
             .action("path", "/sockets")
-            .action("nonce", nonce)
             .action("tls-channel-binding", cb);
         let token = tb.sign().await.unwrap();
 
         let header = format!("Bearer {}", token.encode());
-        auth.check_request("GET", "/sockets", &header, Some(nonce), Some(cb))
+        auth.check_request("GET", "/sockets", &header, Some(cb))
             .expect("valid ed25519 token should pass");
     }
 
     #[tokio::test]
-    async fn test_ssh_auth_rejects_without_header() {
+    async fn test_ssh_auth_redirects_without_header() {
         use axum::body::Body;
         use axum::http::Request;
         use tower::ServiceExt;
@@ -1222,7 +1218,17 @@ mod sshauth_tests {
             .oneshot(Request::get("/sockets").body(Body::empty()).unwrap())
             .await
             .unwrap();
-        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(response.status(), StatusCode::TEMPORARY_REDIRECT);
+        let location = response
+            .headers()
+            .get("location")
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert!(
+            location.starts_with("/sockets?nonce="),
+            "redirect should include nonce, got: {location}"
+        );
     }
 
     #[tokio::test]
@@ -1233,14 +1239,26 @@ mod sshauth_tests {
 
         let (auth, _) = make_test_ssh_auth();
         let app = make_auth_test_router(vec![Box::new(auth)]);
+
+        // First: get a server-generated nonce via redirect
+        let response = app
+            .clone()
+            .oneshot(Request::get("/sockets").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::TEMPORARY_REDIRECT);
+        let location = response
+            .headers()
+            .get("location")
+            .unwrap()
+            .to_str()
+            .unwrap();
+
+        // Then: send a bogus token to the redirected URL
         let response = app
             .oneshot(
-                Request::get("/sockets")
+                Request::get(location)
                     .header("Authorization", "Bearer bogus-token")
-                    .header(
-                        varlink_http_bridge::SSHAUTH_NONCE_HEADER,
-                        "a-nonce-long-enough-1234",
-                    )
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -1265,8 +1283,7 @@ mod sshauth_tests {
             _method: &str,
             _path: &str,
             _auth_header: &str,
-            _nonce: Option<&str>,
-            _channel_binding: Option<&str>,
+            _tls_channel_binding: Option<&str>,
         ) -> anyhow::Result<()> {
             anyhow::bail!("{}", self.0)
         }
@@ -1282,9 +1299,23 @@ mod sshauth_tests {
             Box::new(RejectingAuthenticator("error1")),
             Box::new(RejectingAuthenticator("error2")),
         ]);
+
+        // Get a server nonce via redirect
+        let response = app
+            .clone()
+            .oneshot(Request::get("/sockets").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let location = response
+            .headers()
+            .get("location")
+            .unwrap()
+            .to_str()
+            .unwrap();
+
         let response = app
             .oneshot(
-                Request::get("/sockets")
+                Request::get(location)
                     .header("Authorization", "Bearer dummy")
                     .body(Body::empty())
                     .unwrap(),
@@ -1331,71 +1362,21 @@ mod sshauth_tests {
     }
 
     #[tokio::test]
-    async fn test_ssh_auth_rejects_replayed_nonce() {
-        let (auth, key_path) = make_test_ssh_auth();
-        let signer = make_test_token_signer(&key_path);
-
-        let nonce = "replay-me12345678";
-        let cb = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
-
-        let mut tb = signer.sign_for();
-        tb.action("method", "GET")
-            .action("path", "/sockets")
-            .action("nonce", nonce)
-            .action("tls-channel-binding", cb);
-        let token = tb.sign().await.unwrap();
-        let header = format!("Bearer {}", token.encode());
-
-        // First use should succeed
-        auth.check_request("GET", "/sockets", &header, Some(nonce), Some(cb))
-            .expect("first use of nonce should pass");
-
-        // Replay with the same nonce should fail
-        let result = auth.check_request("GET", "/sockets", &header, Some(nonce), Some(cb));
-        assert!(result.is_err(), "replayed nonce should be rejected");
-        assert!(
-            result
-                .unwrap_err()
-                .to_string()
-                .contains("nonce already used"),
-            "error should mention nonce replay"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_ssh_auth_rejects_missing_nonce() {
-        let (auth, key_path) = make_test_ssh_auth();
-        let signer = make_test_token_signer(&key_path);
-
-        let mut tb = signer.sign_for();
-        tb.action("method", "GET").action("path", "/sockets");
-        let token = tb.sign().await.unwrap();
-        let header = format!("Bearer {}", token.encode());
-
-        // Without a nonce, the request should be rejected
-        let result = auth.check_request("GET", "/sockets", &header, None, None);
-        assert!(result.is_err(), "request without nonce should be rejected");
-        assert!(result.unwrap_err().to_string().contains("missing nonce"));
-    }
-
-    #[tokio::test]
     async fn test_ssh_auth_channel_binding_mismatch_rejected() {
         let (auth, key_path) = make_test_ssh_auth();
         let signer = make_test_token_signer(&key_path);
 
-        let nonce = "cb-mismatch-test12345";
         let cb_signer = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
         let cb_verifier = "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB=";
 
         let mut tb = signer.sign_for();
         tb.action("method", "GET")
             .action("path", "/sockets")
-            .action("nonce", nonce)
             .action("tls-channel-binding", cb_signer);
         let token = tb.sign().await.unwrap();
 
         let header = format!("Bearer {}", token.encode());
-        let result = auth.check_request("GET", "/sockets", &header, Some(nonce), Some(cb_verifier));
+        let result = auth.check_request("GET", "/sockets", &header, Some(cb_verifier));
         assert!(
             result.is_err(),
             "mismatched channel binding should be rejected (relay attack)"
@@ -1407,18 +1388,16 @@ mod sshauth_tests {
         let (auth, key_path) = make_test_ssh_auth();
         let signer = make_test_token_signer(&key_path);
 
-        let nonce = "cb-match-test-123456";
         let cb = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
 
         let mut tb = signer.sign_for();
         tb.action("method", "GET")
             .action("path", "/sockets")
-            .action("nonce", nonce)
             .action("tls-channel-binding", cb);
         let token = tb.sign().await.unwrap();
 
         let header = format!("Bearer {}", token.encode());
-        auth.check_request("GET", "/sockets", &header, Some(nonce), Some(cb))
+        auth.check_request("GET", "/sockets", &header, Some(cb))
             .expect("matching channel binding should pass");
     }
 

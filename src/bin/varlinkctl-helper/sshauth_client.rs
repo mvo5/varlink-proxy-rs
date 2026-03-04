@@ -32,8 +32,8 @@ pub(crate) fn maybe_add_auth_headers(
         .path_and_query()
         .map_or(uri.path(), tungstenite::http::uri::PathAndQuery::as_str);
 
-    let (bearer, nonce) = match build_auth_token("GET", path_and_query, tls_channel_binding) {
-        Ok(Some((bearer, nonce))) => (bearer, nonce),
+    let bearer = match build_auth_token("GET", path_and_query, tls_channel_binding) {
+        Ok(Some(bearer)) => bearer,
         Ok(None) => return Ok(()),
         Err(e) => {
             warn!("SSH auth token generation failed, proceeding without: {e:#}");
@@ -43,10 +43,6 @@ pub(crate) fn maybe_add_auth_headers(
     request.headers_mut().insert(
         "Authorization",
         bearer.parse().context("invalid auth header value")?,
-    );
-    request.headers_mut().insert(
-        varlink_http_bridge::SSHAUTH_NONCE_HEADER,
-        nonce.parse().context("invalid nonce header value")?,
     );
     Ok(())
 }
@@ -58,7 +54,7 @@ fn build_auth_token(
     method: &str,
     path_and_query: &str,
     tls_channel_binding: Option<&str>,
-) -> Result<Option<(String, String)>> {
+) -> Result<Option<String>> {
     // The sshauth crate is async so we need to run this inside an async context
     TOKIO_RT.block_on(async {
         let Some(mut signer) = build_signer().await? else {
@@ -69,8 +65,6 @@ fn build_auth_token(
             signer.algo, signer.fingerprint, signer.comment, signer.source,
         );
 
-        let nonce = generate_nonce();
-
         signer
             .builder
             .include_fingerprint(true)
@@ -80,14 +74,13 @@ fn build_auth_token(
         let mut tb = token_signer.sign_for();
         tb.action("method", method)
             .action("path", path_and_query)
-            .action("nonce", &nonce)
             .action(
                 "tls-channel-binding",
                 tls_channel_binding.unwrap_or_default(),
             );
 
         let token: sshauth::token::Token = tb.sign().await?;
-        Ok(Some((format!("Bearer {}", token.encode()), nonce)))
+        Ok(Some(format!("Bearer {}", token.encode())))
     })
 }
 
@@ -179,12 +172,6 @@ async fn build_signer() -> Result<Option<Signer>> {
 
     // No VARLINK_SSH_KEY or SSH_AUTH_SOCK
     Ok(None)
-}
-
-fn generate_nonce() -> String {
-    let mut buf = [0u8; 16];
-    openssl::rand::rand_bytes(&mut buf).expect("openssl PRNG failed");
-    openssl::base64::encode_block(&buf)
 }
 
 /// Read the signing key from the agent.

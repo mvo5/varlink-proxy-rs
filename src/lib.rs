@@ -6,10 +6,9 @@
 /// so they cannot be replayed against other services.
 pub const SSHAUTH_MAGIC_PREFIX: [u8; 8] = *b"vhbridge";
 
-#[cfg(feature = "sshauth")]
-/// HTTP header carrying the random nonce that is included in the signed
-/// token payload to prevent replay attacks.
-pub const SSHAUTH_NONCE_HEADER: &str = "x-auth-nonce";
+/// Query parameter name for the server-generated nonce used in the
+/// redirect-based authentication flow.
+pub const AUTH_NONCE_PARAM: &str = "nonce";
 
 /// TLS channel binding label per RFC 9266 (`tls-exporter`).
 ///
