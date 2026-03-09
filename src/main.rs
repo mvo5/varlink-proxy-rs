@@ -5,12 +5,14 @@ use async_stream::stream;
 use axum::{
     Router,
     body::Body,
+    extract::connect_info::Connected,
     extract::ws::{Message, WebSocket, WebSocketUpgrade},
     extract::{ConnectInfo, DefaultBodyLimit, Path, Query, State},
     http::StatusCode,
     middleware::Next,
     response::{IntoResponse, Response},
     routing::{get, post},
+    serve::IncomingStream,
 };
 use listenfd::ListenFd;
 use log::{debug, error, warn};
@@ -246,14 +248,54 @@ impl VarlinkSockets {
     }
 }
 
-async fn get_varlink_connection_with_validate_socket(
+type VarlinkConns = HashMap<String, Arc<tokio::sync::Mutex<zlink::unix::Connection>>>;
+
+/// Per-HTTP-connection cache of varlink unix socket connections.
+///
+/// Created once when an HTTP connection is accepted (via [`Connected`])
+/// and shared across all requests on that connection.  When the HTTP
+/// connection closes the cache is dropped, closing the varlink sockets.
+///
+/// Also carries the optional TLS channel binding for SSH-based auth.
+#[derive(Clone)]
+struct VarlinkConnCache {
+    conns: Arc<tokio::sync::Mutex<VarlinkConns>>,
+    tls_channel_binding: Option<String>,
+}
+
+impl VarlinkConnCache {
+    fn new(tls_channel_binding: Option<String>) -> Self {
+        Self {
+            conns: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            tls_channel_binding,
+        }
+    }
+}
+
+impl Connected<IncomingStream<'_, TcpListener>> for VarlinkConnCache {
+    fn connect_info(_: IncomingStream<'_, TcpListener>) -> Self {
+        Self::new(None)
+    }
+}
+
+async fn get_varlink_connection(
     socket: &str,
     state: &AppState,
-) -> Result<zlink::unix::Connection, AppError> {
+    conn_cache: &VarlinkConnCache,
+) -> Result<Arc<tokio::sync::Mutex<zlink::unix::Connection>>, AppError> {
     let varlink_socket_path = state.varlink_sockets.resolve_socket_with_validate(socket)?;
-    debug!("Creating varlink connection for: {varlink_socket_path}");
 
-    let connection = zlink::unix::connect(&varlink_socket_path).await?;
+    let mut cache = conn_cache.conns.lock().await;
+    if let Some(conn) = cache.get(socket) {
+        debug!("Reusing varlink connection for: {varlink_socket_path}");
+        return Ok(conn.clone());
+    }
+
+    debug!("Creating varlink connection for: {varlink_socket_path}");
+    let connection = Arc::new(tokio::sync::Mutex::new(
+        zlink::unix::connect(&varlink_socket_path).await?,
+    ));
+    cache.insert(socket.to_string(), connection.clone());
     Ok(connection)
 }
 
@@ -298,15 +340,7 @@ impl axum::serve::Listener for TlsListener {
     }
 }
 
-#[derive(Clone)]
-struct TlsConnectionInfo {
-    tls_channel_binding: String,
-}
-
-use axum::extract::connect_info::Connected;
-use axum::serve::IncomingStream;
-
-impl Connected<IncomingStream<'_, TlsListener>> for TlsConnectionInfo {
+impl Connected<IncomingStream<'_, TlsListener>> for VarlinkConnCache {
     fn connect_info(target: IncomingStream<'_, TlsListener>) -> Self {
         use varlink_http_bridge::{TLS_CHANNEL_BINDING_LABEL, TLS_CHANNEL_BINDING_LEN};
 
@@ -323,9 +357,7 @@ impl Connected<IncomingStream<'_, TlsListener>> for TlsConnectionInfo {
             "TLS channel binding must not be all zeros"
         );
         let tls_channel_binding = openssl::base64::encode_block(&buf);
-        TlsConnectionInfo {
-            tls_channel_binding,
-        }
+        Self::new(Some(tls_channel_binding))
     }
 }
 
@@ -428,8 +460,8 @@ async fn auth_middleware(
 
     let tls_channel_binding: Option<String> = request
         .extensions()
-        .get::<ConnectInfo<TlsConnectionInfo>>()
-        .map(|ci| ci.0.tls_channel_binding.clone());
+        .get::<ConnectInfo<VarlinkConnCache>>()
+        .and_then(|ci| ci.0.tls_channel_binding.clone());
 
     let method = request.method().as_str().to_string();
     let path = request
@@ -472,11 +504,13 @@ async fn route_sockets_get(State(state): State<AppState>) -> Result<axum::Json<V
 }
 
 async fn route_socket_get(
+    ConnectInfo(conn_cache): ConnectInfo<VarlinkConnCache>,
     Path(socket): Path<String>,
     State(state): State<AppState>,
 ) -> Result<axum::Json<Value>, AppError> {
     debug!("GET socket: {socket}");
-    let mut connection = get_varlink_connection_with_validate_socket(&socket, &state).await?;
+    let conn_arc = get_varlink_connection(&socket, &state, &conn_cache).await?;
+    let mut connection = conn_arc.lock().await;
 
     let info = connection
         .get_info()
@@ -486,11 +520,13 @@ async fn route_socket_get(
 }
 
 async fn route_socket_interface_get(
+    ConnectInfo(conn_cache): ConnectInfo<VarlinkConnCache>,
     Path((socket, interface)): Path<(String, String)>,
     State(state): State<AppState>,
 ) -> Result<axum::Json<Value>, AppError> {
     debug!("GET socket: {socket}, interface: {interface}");
-    let mut connection = get_varlink_connection_with_validate_socket(&socket, &state).await?;
+    let conn_arc = get_varlink_connection(&socket, &state, &conn_cache).await?;
+    let mut connection = conn_arc.lock().await;
 
     let description = connection
         .get_interface_description(&interface)
@@ -509,7 +545,9 @@ async fn route_socket_interface_get(
 ///
 /// Each record is RS (0x1E) + JSON + LF.  The content-type is
 /// `application/json-seq`.
-fn varlink_call_to_jsonseq(mut conn: zlink::unix::Connection) -> Response {
+fn varlink_call_to_jsonseq(
+    mut conn: tokio::sync::OwnedMutexGuard<zlink::unix::Connection>,
+) -> Response {
     let stream = stream! {
         loop {
             match conn.receive_reply::<Value, DynReplyError>().await {
@@ -549,6 +587,7 @@ fn varlink_call_to_jsonseq(mut conn: zlink::unix::Connection) -> Response {
 /// - `Accept: application/json-seq`: stream replies via varlink `more`
 ///   as a JSON text sequence (RFC 7464)
 async fn route_call_post(
+    ConnectInfo(conn_cache): ConnectInfo<VarlinkConnCache>,
     Path(method): Path<String>,
     Query(params): Query<HashMap<String, String>>,
     State(state): State<AppState>,
@@ -571,8 +610,6 @@ async fn route_call_post(
             .to_string()
     };
 
-    let mut connection = get_varlink_connection_with_validate_socket(&socket, &state).await?;
-
     let accept = headers
         .get(axum::http::header::ACCEPT)
         .and_then(|v| v.to_str().ok())
@@ -583,6 +620,8 @@ async fn route_call_post(
         parameters: Some(&call_args),
     };
 
+    let conn_arc = get_varlink_connection(&socket, &state, &conn_cache).await?;
+    let mut connection = conn_arc.lock_owned().await;
     if accept.contains("application/json-seq") {
         connection
             .send_call(&zlink::Call::new(&method_call).set_more(true), vec![])
@@ -786,20 +825,18 @@ async fn run_server(
     authenticators: Vec<Box<dyn Authenticator>>,
 ) -> anyhow::Result<()> {
     let app = create_router(varlink_sockets_path, authenticators)?;
+    let make_svc = app.into_make_service_with_connect_info::<VarlinkConnCache>();
 
     if let Some(acceptor) = tls_acceptor {
         let tls_listener = TlsListener {
             inner: listener,
             acceptor,
         };
-        axum::serve(
-            tls_listener,
-            app.into_make_service_with_connect_info::<TlsConnectionInfo>(),
-        )
-        .with_graceful_shutdown(shutdown_signal())
-        .await?;
+        axum::serve(tls_listener, make_svc)
+            .with_graceful_shutdown(shutdown_signal())
+            .await?;
     } else {
-        axum::serve(listener, app)
+        axum::serve(listener, make_svc)
             .with_graceful_shutdown(shutdown_signal())
             .await?;
     }
