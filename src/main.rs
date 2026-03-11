@@ -255,6 +255,21 @@ async fn get_varlink_connection_with_validate_socket(
     Ok(connection)
 }
 
+/// Configure production socket options on an accepted TCP connection.
+fn configure_socket(stream: &tokio::net::TcpStream) -> Result<(), Box<dyn std::error::Error>> {
+    stream
+        .set_nodelay(true)
+        .map_err(|e| format!("set TCP_NODELAY: {e}"))?;
+    let sock = socket2::SockRef::from(stream);
+    let keepalive = socket2::TcpKeepalive::new()
+        .with_time(std::time::Duration::from_secs(60))
+        .with_interval(std::time::Duration::from_secs(10))
+        .with_retries(6);
+    sock.set_tcp_keepalive(&keepalive)
+        .map_err(|e| format!("set SO_KEEPALIVE: {e}"))?;
+    Ok(())
+}
+
 struct TlsListener {
     inner: TcpListener,
     acceptor: openssl::ssl::SslAcceptor,
@@ -272,6 +287,7 @@ impl axum::serve::Listener for TlsListener {
                     .accept()
                     .await
                     .map_err(|e| format!("TCP accept failed: {e}"))?;
+                configure_socket(&stream)?;
                 let ssl = openssl::ssl::Ssl::new(self.acceptor.context())
                     .map_err(|e| format!("SSL context error: {e}"))?;
                 let mut tls_stream = tokio_openssl::SslStream::new(ssl, stream)
@@ -287,6 +303,37 @@ impl axum::serve::Listener for TlsListener {
             match res {
                 Ok(conn) => return conn,
                 Err(e) => warn!("{e}"),
+            }
+        }
+    }
+
+    fn local_addr(&self) -> std::io::Result<Self::Addr> {
+        self.inner.local_addr()
+    }
+}
+
+/// Wrapper around [`TcpListener`] that sets keepalive on accepted connections.
+///
+/// axum already sets `TCP_NODELAY` for plain TCP, but not `SO_KEEPALIVE`.
+/// We set both here for consistency with the TLS path.
+struct PlainListener {
+    inner: TcpListener,
+}
+
+impl axum::serve::Listener for PlainListener {
+    type Io = tokio::net::TcpStream;
+    type Addr = std::net::SocketAddr;
+
+    async fn accept(&mut self) -> (Self::Io, Self::Addr) {
+        loop {
+            match self.inner.accept().await {
+                Ok((stream, addr)) => {
+                    if let Err(e) = configure_socket(&stream) {
+                        warn!("{e}");
+                    }
+                    return (stream, addr);
+                }
+                Err(e) => warn!("TCP accept failed: {e}"),
             }
         }
     }
@@ -740,7 +787,8 @@ async fn run_server(
         .with_graceful_shutdown(shutdown_signal())
         .await?;
     } else {
-        axum::serve(listener, app)
+        let plain_listener = PlainListener { inner: listener };
+        axum::serve(plain_listener, app)
             .with_graceful_shutdown(shutdown_signal())
             .await?;
     }

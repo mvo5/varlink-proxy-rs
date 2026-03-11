@@ -132,6 +132,8 @@ fn connect_ws(url: &str) -> Result<Ws> {
 
     let tcp = TcpStream::connect((host, port))
         .with_context(|| format!("TCP connect to {host}:{port} failed"))?;
+    tcp.set_nodelay(true)
+        .context("set TCP_NODELAY on client socket")?;
 
     let stream =
         if use_tls {
